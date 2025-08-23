@@ -11,6 +11,7 @@
 #include <pcap/pcap.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <inttypes.h>   // For PRI* macros used in printf of 64-bit values
 #include <string.h>
 #include <stdlib.h>
 #include <getopt.h>
@@ -37,6 +38,16 @@
   #else
     #define le16toh(x) __builtin_bswap16(x)
     #define le32toh(x) __builtin_bswap32(x)
+  #endif
+#endif
+
+// Fallback for le64toh on systems where it's missing.
+// Converts a 64-bit little-endian value to host byte order.
+#ifndef le64toh
+  #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+    #define le64toh(x) (x)
+  #else
+    #define le64toh(x) __builtin_bswap64((uint64_t)(x))
   #endif
 #endif
 
@@ -465,20 +476,29 @@ int main(int argc, char** argv)
   uint64_t t0 = now_ms();
   uint64_t bytes_period = 0;
   uint32_t rx_pkts_period = 0;
-  int rssi_min =  127;
+  
+  int rssi_min = 127;
   int rssi_max = -127;
   int64_t rssi_sum = 0;
   uint32_t rssi_samples = 0;
-  int have_seq = 0;
-  uint16_t expect_seq = 0;
-  uint32_t lost_period = 0;
+  /* Per-TX loss accumulator for the current stats period; summed to print. */
+  uint32_t lost_period = 0;  /* computed from G[*].lost at print time */
+
 
   /* Per-antenna per-interface accumulators */
   struct ant_stats A[MAX_IFS][RX_ANT_MAX];
   ant_stats_reset(A, n_open);
-
-  /* Global dedup window */
-  struct seq_window W; seqwin_init(&W);
+  /* Per-TX dedup windows (one 12-bit sequence space per tx_id). */
+  struct seq_window SW[256];           /* per-TX 128-bit sliding windows */
+  /* Per-TX sequence tracking for loss accounting over time. */
+  struct { int have_seq; uint16_t expect_seq; uint32_t lost; } G[256];
+  /* Initialize per-TX state */
+  for (int t = 0; t < 256; ++t) {      /* fill all possible tx_id slots */
+    seqwin_init(&SW[t]);
+    G[t].have_seq = 0;                 /* no seq seen yet for this tx_id */
+    G[t].expect_seq = 0;               /* next expected 12-bit seq */
+    G[t].lost = 0;                     /* period loss counter */
+  }
 
   while (g_run) {
     uint64_t now = now_ms();
@@ -549,20 +569,22 @@ int main(int argc, char** argv)
            fprintf(stderr, "[DT] iface=%d seq=%u dt_us=%" PRId64 " (HOST)\n", i, v.seq12, dt_us_host);
         }
         
-
-        /* dedup by seq */
-        int dup = seqwin_check_set(&W, v.seq12);
-        if (!dup) {
-          if (!have_seq) { have_seq = 1; expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF); }
-          else {
-            if (v.seq12 != expect_seq) {
-              uint16_t gap = (uint16_t)((v.seq12 - expect_seq) & 0x0FFF);
-              lost_period += gap;
-              expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+        // dedup by seq in the per-TX window
+        int dup = seqwin_check_set(&SW[tx_id], v.seq12);
+          /* Per-TX loss tracking: count gaps within each tx_id sequence space. */
+          if (!G[tx_id].have_seq) {
+            G[tx_id].have_seq = 1;
+            G[tx_id].expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+          } else {
+            if (v.seq12 != G[tx_id].expect_seq) {
+              uint16_t gap = (uint16_t)((v.seq12 - G[tx_id].expect_seq) & 0x0FFF);
+              G[tx_id].lost += gap;  /* accumulate loss for this tx_id in current period */
+              G[tx_id].expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
             } else {
-              expect_seq = (uint16_t)((expect_seq + 1) & 0x0FFF);
+              G[tx_id].expect_seq = (uint16_t)((G[tx_id].expect_seq + 1) & 0x0FFF);
             }
-          }
+          }        
+
           /* global per-packet RSSI = best chain */
           int pkt_rssi_valid = 0;
           int pkt_rssi = -127;
@@ -616,6 +638,11 @@ int main(int argc, char** argv)
 stats_tick:
     uint64_t t1 = now_ms();
     if (t1 - t0 >= (uint64_t)cli.stat_period_ms) {
+      /* Sum per-TX losses for this period (quality is based on all active tx_id). */
+      uint32_t lost_sum = 0;
+      for (int t = 0; t < 256; ++t) lost_sum += G[t].lost;
+      lost_period = lost_sum;
+
       double seconds = (double)(t1 - t0) / 1000.0;
       double kbps = seconds > 0.0 ? (bytes_period * 8.0 / 1000.0) / seconds : 0.0;
       uint32_t expected = rx_pkts_period + lost_period;
@@ -643,11 +670,12 @@ stats_tick:
         }
       }
 
-      /* reset period */
+      // reset period (keep per-TX expect_seq across periods)
       t0 = t1;
       bytes_period = 0;
       rx_pkts_period = 0;
       lost_period = 0;
+      for (int t = 0; t < 256; ++t) G[t].lost = 0;  // clear only period losses
       rssi_min = 127; rssi_max = -127; rssi_sum = 0; rssi_samples = 0;
       ant_stats_reset(A, n_open);
     }

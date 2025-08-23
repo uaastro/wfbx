@@ -31,6 +31,16 @@
   #endif
 #endif
 
+// Fallback for htole64 on systems where it's missing.
+// Converts a 64-bit host-order value to little-endian representation.
+#ifndef htole64
+  #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+    #define htole64(x) (x)
+  #else
+    #define htole64(x) __builtin_bswap64((uint64_t)(x))
+  #endif
+#endif
+
 #include "wfb_defs.h"
 
 #define MAX_FRAME        4096
