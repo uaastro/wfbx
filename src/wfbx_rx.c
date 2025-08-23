@@ -571,7 +571,8 @@ int main(int argc, char** argv)
         
         // dedup by seq in the per-TX window
         int dup = seqwin_check_set(&SW[tx_id], v.seq12);
-          /* Per-TX loss tracking: count gaps within each tx_id sequence space. */
+        if (!dup) {  
+        /* Per-TX loss tracking: count gaps within each tx_id sequence space. */
           if (!G[tx_id].have_seq) {
             G[tx_id].have_seq = 1;
             G[tx_id].expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
