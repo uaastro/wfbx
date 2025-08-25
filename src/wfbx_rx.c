@@ -11,6 +11,7 @@
 #include <pcap/pcap.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <limits.h>     /* for SCHAR_MIN used in radiotap RSSI parsing */
 #include <inttypes.h>   // For PRI* macros used in printf of 64-bit values
 #include <string.h>
 #include <stdlib.h>
@@ -61,6 +62,26 @@
 #ifndef STATS_PERIOD_MS_DEFAULT
 #define STATS_PERIOD_MS_DEFAULT 1000
 #endif
+
+/* Maximum number of distinct transmitters (tx_id is 0..255). */
+#define MAX_TX_IDS 256
+
+/* Per-interface dedup windows to prevent double-counting on the same iface. */
+/* One 12-bit sequence sliding window per (tx_id, iface). */
+struct seq_window; /* forward; already defined elsewhere */
+
+/* Per-chain per-iface sequence state for loss accounting.
+ * We update this only when a non-duplicate frame (for this iface) has an RSSI sample on that chain. */
+struct per_chain_seq_state {
+  int      have_seq;     /* whether we saw any frame on this (tx,iface,chain) */
+  uint16_t expect_seq;   /* next expected 12-bit seq on this (tx,iface,chain) */
+  uint32_t lost;         /* number of missing frames on this (tx,iface,chain) in current period */
+};
+
+/* Human-readable antenna label: 0XX for iface 0, 1XX for iface 1, etc. */
+static inline int ant_label_id(int iface_idx, int chain_idx) {
+  return iface_idx * 100 + chain_idx;
+}
 
 /* Maximum number of distinct transmitters (tx_id is 0..255). */
 #define MAX_TX_IDS 256
@@ -302,7 +323,7 @@ static void print_help(const char* prog)
     "Options:\n"
     "  --ip <addr>         UDP destination IP (default: %s)\n"
     "  --port <num>        UDP destination port (default: %d)\n"
-    "  --tx_id <spec>      Filter by transmitter IDs:\n"
+    "  --tx_id <list>      Filter by transmitter IDs:\n"
     "                     'any' or '-1'               → accept all\n"
     "                      include list '1,2,5,10-12' → accept only listed IDs\n"
     "                      exclude list '!3,7,20-25   → accept all except listed IDs'\n"
@@ -483,11 +504,11 @@ int main(int argc, char** argv)
     pcap_t* p = pcap_create(cli.ifname[i], errbuf);
     if (!p) { fprintf(stderr, "pcap_create(%s): %s\n", cli.ifname[i], errbuf); continue; }
     (void)pcap_set_immediate_mode(p, 1);
-    (void)pcap_setnonblock(p, 1, errbuf);
     if (pcap_activate(p) != 0) {
       fprintf(stderr, "pcap_activate(%s): %s\n", cli.ifname[i], pcap_geterr(p));
       pcap_close(p); continue;
     }
+    (void)pcap_setnonblock(p, 1, errbuf);
     int fd = pcap_get_selectable_fd(p);
     if (fd < 0) {
       fprintf(stderr, "pcap_get_selectable_fd(%s) failed; interface skipped\n", cli.ifname[i]);
@@ -520,37 +541,38 @@ int main(int argc, char** argv)
   struct ant_stats A[MAX_IFS][RX_ANT_MAX];
   ant_stats_reset(A, n_open);
 
-  /* Per-TX packet/bytes counters for the current stats period.
-  * pkts_tx[t] increments on each accepted non-duplicate frame from tx_id=t. */
-  uint32_t pkts_tx[MAX_TX_IDS] = {0};
-  uint64_t bytes_tx[MAX_TX_IDS] = {0};
-
+  /* Per-TX packet/bytes counters for the current stats period. */
+  uint32_t pkts_tx[MAX_TX_IDS]  = {0};  /* accepted non-duplicates (global) */
+  uint64_t bytes_tx[MAX_TX_IDS] = {0};  /* payload bytes minus TS tail */
+ 
   /* Per-TX dedup windows (one 12-bit sequence space per tx_id). */
-  struct seq_window SW[MAX_TX_IDS];           /* per-TX 128-bit sliding windows */
-  /* Per-TX sequence tracking for loss accounting over time. */
+  struct seq_window SW[MAX_TX_IDS];  /* global dedup for forwarding and per-TX stats */
+  /* Per-IFACE dedup windows (to compute per-iface/chain stats independently). */
+  struct seq_window SWIF[MAX_TX_IDS][MAX_IFS]; /* dedup per (tx,iface) */
+  /* Per-TX sequence tracking for global loss accounting. */
   struct { int have_seq; uint16_t expect_seq; uint32_t lost; } G[MAX_TX_IDS];
+ 
+  /* Per-TX per-IFACE per-CHAIN sequence trackers for per-antenna loss. */
+  struct per_chain_seq_state PC[MAX_TX_IDS][MAX_IFS][RX_ANT_MAX];
+ 
 
-  /* Per-TX per-iface sequence trackers for per-antenna loss in the stats. */
-  struct per_if_seq_state PL[MAX_TX_IDS][MAX_IFS];
-
-  /* Per-TX per-iface per-chain RSSI stats for the current period.
-   * We reuse ant_stats structure to accumulate min/max/sum/samples per chain. */
+  /* Per-TX per-IFACE per-CHAIN RSSI stats for the current period. */
   struct ant_stats ATX[MAX_TX_IDS][MAX_IFS][RX_ANT_MAX];
 
   /* Initialize per-TX state */
   for (int t = 0; t < MAX_TX_IDS; ++t) {      /* fill all possible tx_id slots */
     seqwin_init(&SW[t]);
+    for (int a = 0; a < n_open; ++a) {seqwin_init(&SWIF[t][a]);}
     G[t].have_seq = 0;                 /* no seq seen yet for this tx_id */
     G[t].expect_seq = 0;               /* next expected 12-bit seq */
     G[t].lost = 0;                     /* period loss counter */
-    for (int a = 0; a < n_open; ++a) {
-      PL[t][a].have_seq = 0;
-      PL[t][a].expect_seq = 0;
-      PL[t][a].lost = 0;
+    for (int a = 0; a < n_open; ++a)
       for (int c = 0; c < RX_ANT_MAX; ++c) {
-        ant_stats_clear(&ATX[t][a][c]); /* helper that zeroes one ant_stats */
+        PC[t][a][c].have_seq = 0;
+        PC[t][a][c].expect_seq = 0;
+        PC[t][a][c].lost = 0;
+        ant_stats_clear(&ATX[t][a][c]); /* zero per-chain RSSI accumulators */
       }
-    }
   }
 
   while (g_run) {
@@ -622,13 +644,15 @@ int main(int argc, char** argv)
            //fprintf(stderr, "[DT] iface=%d seq=%u dt_us=%" PRId64 " (HOST)\n", i, v.seq12, dt_us_host);
         }
         
-        // dedup by seq in the per-TX window
-        int dup = seqwin_check_set(&SW[tx_id], v.seq12);
-        if (!dup) {  
-          /* Account accepted bytes for this tx_id in current period. */
-          bytes_tx[tx_id] += (uint64_t)v.payload_len;
-          /* Count per-TX accepted packet for this period. */
-          pkts_tx[tx_id] += 1;
+        /* Global dedup by seq in the per-TX window (used for forwarding and per-TX totals). */
+        int dup_global = seqwin_check_set(&SW[tx_id], v.seq12);
+        if (!dup_global) {
+          /* Payload bytes minus the 8-byte TS tail if present (to reflect UDP payload rate). */
+          size_t eff_len = v.payload_len;
+          if (has_t0 && eff_len >= TS_TAIL_BYTES) eff_len -= TS_TAIL_BYTES;
+          bytes_tx[tx_id] += (uint64_t)eff_len;
+          pkts_tx[tx_id]  += 1;
+
         /* Per-TX loss tracking: count gaps within each tx_id sequence space. */
           if (!G[tx_id].have_seq) {
             G[tx_id].have_seq = 1;
@@ -643,8 +667,32 @@ int main(int argc, char** argv)
             }
           }        
 
-          /* Per-TX per-IFACE loss accounting: track gaps observed on this iface only.
-           * 'ifa' must be the index [0..n_open-1] of the interface that captured this frame. */
+        }
+
+        /* Per-IFACE dedup window so that statistics are updated independently for each interface. */
+        int dup_iface = seqwin_check_set(&SWIF[tx_id][i], v.seq12);
+        if (!dup_iface) {
+          /* Per-CHAIN (on this iface) loss accounting and RSSI aggregation. */
+          for (int c = 0; c < rs.chains && c < RX_ANT_MAX; ++c) {
+            if (rs.rssi[c] == SCHAR_MIN) continue; /* chain not present in this frame */
+            /* Update per-chain sequence state: count gaps since last seen seq on this chain. */
+            struct per_chain_seq_state* Q = &PC[tx_id][i][c];
+            if (!Q->have_seq) {
+              Q->have_seq = 1;
+              Q->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+            } else {
+              if (v.seq12 != Q->expect_seq) {
+                uint16_t gap = (uint16_t)((v.seq12 - Q->expect_seq) & 0x0FFF);
+                Q->lost += gap;
+                Q->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+              } else {
+                Q->expect_seq = (uint16_t)((Q->expect_seq + 1) & 0x0FFF);
+              }
+            }
+            /* Accumulate per-chain RSSI for this tx_id on this iface. */
+            ant_stats_update_one(&ATX[tx_id][i][c], (int)rs.rssi[c]);
+          }
+
           int ifa = i;
           if (!PL[tx_id][ifa].have_seq) {
             PL[tx_id][ifa].have_seq = 1;
@@ -687,7 +735,6 @@ int main(int argc, char** argv)
           }
 
 
-          //(void)sendto(us, v.payload, v.payload_len, 0, (struct sockaddr*)&dst, sizeof(dst));
           rx_pkts_period += 1;
           bytes_period   += v.payload_len;
         }
@@ -749,37 +796,39 @@ stats_tick:
           "[TX %03d] dt=%llu ms | pkts=%u lost=%u quality=%d%% | rate=%.1f kbps | RSSI = %.1f dBm\n",
           t, (unsigned long long)(t1 - t0), pk, ls, tx_quality, tx_kbps, tx_ravg);
 
-        /* Per-antenna lines for this tx_id: we print chain stats and iface-specific losses. */
+        /* Per-antenna lines for this tx_id (lost is per IFACE+CHAIN). */
         for (int a=0; a<n_open; ++a) {
-          uint32_t lost_if = PL[t][a].lost;
+          //uint32_t lost_if = PL[t][a].lost;
           for (int c=0; c<RX_ANT_MAX; ++c) {
             const struct ant_stats* S = &ATX[t][a][c];
-            if (S->rssi_samples == 0 && lost_if == 0) continue;
-            uint32_t exp_i = S->rssi_samples + lost_if;
+            //if (S->rssi_samples == 0 && lost_if == 0) continue;
+            //uint32_t exp_i = S->rssi_samples + lost_if;
+            uint32_t lost_ch = PC[t][a][c].lost;
+            if (S->rssi_samples == 0 && lost_ch == 0) continue;
+            uint32_t exp_i = S->rssi_samples + lost_ch;
             int q_i = exp_i ? (int)((S->rssi_samples * 100.0) / exp_i + 0.5) : 100;
             double ravg = (S->rssi_samples>0) ? ((double)S->rssi_sum / (double)S->rssi_samples) : 0.0;
             fprintf(stderr, "   [ANT%03d] pkts=%u lost=%u quality=%d%% | rssi min/avg/max = %d/%.1f/%d dBm\n",
-                    a*RX_ANT_MAX+c, S->rssi_samples, lost_if, q_i,
++              ant_label_id(a,c), S->rssi_samples, lost_ch, q_i,
                     S->rssi_min, ravg, S->rssi_max);
           }
         }
       }
 
-      // reset period (keep per-TX expect_seq across periods)
+      /* reset period (keep per-TX/iface/chain expect_seq across periods) */
       t0 = t1;
       bytes_period = 0;
       rx_pkts_period = 0;
       
       for (int t = 0; t < MAX_TX_IDS; ++t) {
-        G[t].lost = 0;       /* clear per-TX period losses */
-        pkts_tx[t] = 0;      /* clear per-TX period packets */
-        bytes_tx[t] = 0;     /* clear per-TX period bytes */
-        for (int a=0; a<n_open; ++a) {
-          PL[t][a].lost = 0; /* clear per-iface period losses (keep expect_seq) */
+        G[t].lost    = 0;     /* clear per-TX period losses */
+        pkts_tx[t]   = 0;     /* clear per-TX period packets */
+        bytes_tx[t]  = 0;     /* clear per-TX period bytes */
+        for (int a=0; a<n_open; ++a)
           for (int c=0; c<RX_ANT_MAX; ++c) {
-            ant_stats_clear(&ATX[t][a][c]); /* clear per-TX per-chain RSSI stats */
+            PC[t][a][c].lost = 0;          /* clear per-chain period losses (keep expect_seq) */
+            ant_stats_clear(&ATX[t][a][c]);/* clear per-chain RSSI stats */
           }
-        }
       }
       
       rssi_min = 127; rssi_max = -127; rssi_sum = 0; rssi_samples = 0;
