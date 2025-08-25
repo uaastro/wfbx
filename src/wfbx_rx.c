@@ -769,7 +769,6 @@ stats_tick:
       t0 = t1;
       bytes_period = 0;
       rx_pkts_period = 0;
-      lost_period = 0;
       
       for (int t = 0; t < MAX_TX_IDS; ++t) {
         G[t].lost = 0;       /* clear per-TX period losses */
