@@ -634,6 +634,7 @@ int main(int argc, char** argv)
         /* --- Per-packet Δt print (per interface) --- */
         if (rs.has_tsft && has_t0) {
             int64_t dt_us = (int64_t)rs.tsft_us - (int64_t)(t0_ns / 1000ull);
+            (void)dt_us;
             /* iface_index = i ph[i]) */
             //fprintf(stderr, "[DT] iface=%d seq=%u dt_us=%" PRId64 " tsft_us=%" PRIu64 " t0_ns=%" PRIu64 "\n",
             //i, v.seq12, dt_us, (uint64_t)rs.tsft_us, (uint64_t)t0_ns);
@@ -641,6 +642,7 @@ int main(int argc, char** argv)
         else
         {   
            int64_t dt_us_host = (int64_t)(rx_ns_host/1000ull) - (int64_t)(t0_ns/1000ull);
+           (void)dt_us_host;
            //fprintf(stderr, "[DT] iface=%d seq=%u dt_us=%" PRId64 " (HOST)\n", i, v.seq12, dt_us_host);
         }
         
@@ -691,27 +693,6 @@ int main(int argc, char** argv)
             }
             /* Accumulate per-chain RSSI for this tx_id on this iface. */
             ant_stats_update_one(&ATX[tx_id][i][c], (int)rs.rssi[c]);
-          }
-
-          int ifa = i;
-          if (!PL[tx_id][ifa].have_seq) {
-            PL[tx_id][ifa].have_seq = 1;
-            PL[tx_id][ifa].expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
-          } else {
-            if (v.seq12 != PL[tx_id][ifa].expect_seq) {
-              uint16_t gap = (uint16_t)((v.seq12 - PL[tx_id][ifa].expect_seq) & 0x0FFF);
-              PL[tx_id][ifa].lost += gap;
-              PL[tx_id][ifa].expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
-            } else {
-              PL[tx_id][ifa].expect_seq = (uint16_t)((PL[tx_id][ifa].expect_seq + 1) & 0x0FFF);
-            }
-          }
-
-          /* Per-TX per-IFACE per-CHAIN RSSI accumulation for current period.
-           * We update stats for each available chain on this iface for this packet. */
-          for (int c = 0; c < rs.chains && c < RX_ANT_MAX; ++c) {
-            if (rs.rssi[c] == SCHAR_MIN) continue; /* chain not present */
-            ant_stats_update_one(&ATX[tx_id][ifa][c], (int)rs.rssi[c]);
           }
           
           /* global per-packet RSSI = best chain */
