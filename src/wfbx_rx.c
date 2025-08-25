@@ -515,8 +515,6 @@ int main(int argc, char** argv)
   int rssi_max = -127;
   int64_t rssi_sum = 0;
   uint32_t rssi_samples = 0;
-  /* Per-TX loss accumulator for the current stats period; summed to print. */
-  uint32_t lost_period = 0;  /* computed from G[*].lost at print time */
 
   /* Per-antenna per-interface accumulators (global, unchanged). */
   struct ant_stats A[MAX_IFS][RX_ANT_MAX];
