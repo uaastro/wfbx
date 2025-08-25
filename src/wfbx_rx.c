@@ -613,13 +613,13 @@ int main(int argc, char** argv)
         if (rs.has_tsft && has_t0) {
             int64_t dt_us = (int64_t)rs.tsft_us - (int64_t)(t0_ns / 1000ull);
             /* iface_index = i ph[i]) */
-            fprintf(stderr, "[DT] iface=%d seq=%u dt_us=%" PRId64 " tsft_us=%" PRIu64 " t0_ns=%" PRIu64 "\n",
-            i, v.seq12, dt_us, (uint64_t)rs.tsft_us, (uint64_t)t0_ns);
+            //fprintf(stderr, "[DT] iface=%d seq=%u dt_us=%" PRId64 " tsft_us=%" PRIu64 " t0_ns=%" PRIu64 "\n",
+            //i, v.seq12, dt_us, (uint64_t)rs.tsft_us, (uint64_t)t0_ns);
         }
         else
         {   
            int64_t dt_us_host = (int64_t)(rx_ns_host/1000ull) - (int64_t)(t0_ns/1000ull);
-           fprintf(stderr, "[DT] iface=%d seq=%u dt_us=%" PRId64 " (HOST)\n", i, v.seq12, dt_us_host);
+           //fprintf(stderr, "[DT] iface=%d seq=%u dt_us=%" PRId64 " (HOST)\n", i, v.seq12, dt_us_host);
         }
         
         // dedup by seq in the per-TX window
