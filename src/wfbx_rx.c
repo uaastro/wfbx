@@ -646,9 +646,10 @@ int main(int argc, char** argv)
            //fprintf(stderr, "[DT] iface=%d seq=%u dt_us=%" PRId64 " (HOST)\n", i, v.seq12, dt_us_host);
         }
         
-        /* Global dedup by seq in the per-TX window (used for forwarding and per-TX totals). */
+        /* Global dedup by seq in the per-TX window. */
         int dup_global = seqwin_check_set(&SW[tx_id], v.seq12);
-        if (!dup_global) {
+        const int should_forward = !dup_global; /* forward only once across all ifaces */
+        if (should_forward) {
           /* Payload bytes minus the 8-byte TS tail if present (to reflect UDP payload rate). */
           size_t eff_len = v.payload_len;
           if (has_t0 && eff_len >= TS_TAIL_BYTES) eff_len -= TS_TAIL_BYTES;
@@ -707,14 +708,14 @@ int main(int argc, char** argv)
             rssi_sum += pkt_rssi;
             rssi_samples++;
           }
-          /* forward once */
+        /* Forward only if not seen on another iface already */
+        if (should_forward) {
           size_t out_len = v.payload_len;
           if (has_t0 && out_len >= TS_TAIL_BYTES) out_len -= TS_TAIL_BYTES;
-
           if (out_len > 0) {
-          (void)sendto(us, v.payload, out_len, 0, (struct sockaddr*)&dst, sizeof(dst));
+            (void)sendto(us, v.payload, out_len, 0, (struct sockaddr*)&dst, sizeof(dst));
           }
-
+        }
 
           rx_pkts_period += 1;
           bytes_period   += v.payload_len;
