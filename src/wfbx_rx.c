@@ -545,6 +545,13 @@ int main(int argc, char** argv)
   uint32_t pkts_tx[MAX_TX_IDS]  = {0};  /* accepted non-duplicates (global) */
   uint64_t bytes_tx[MAX_TX_IDS] = {0};  /* payload bytes minus TS tail */
  
+  /* NEW: last-seen bookkeeping (per tx_id) */
+  uint64_t last_seen_ms[MAX_TX_IDS] = {0};      /* 0 => never seen */
+  uint8_t  last_link_id[MAX_TX_IDS];            /* 0xFF => unknown */
+  uint8_t  last_radio_port[MAX_TX_IDS];         /* 0xFF => unknown */
+  for (int i=0;i<MAX_TX_IDS;i++) { last_link_id[i]=0xFF; last_radio_port[i]=0xFF; }
+
+
   /* Per-TX dedup windows (one 12-bit sequence space per tx_id). */
   struct seq_window SW[MAX_TX_IDS];  /* global dedup for forwarding and per-TX stats */
   /* Per-IFACE dedup windows (to compute per-iface/chain stats independently). */
@@ -620,6 +627,11 @@ int main(int argc, char** argv)
         if (!txf_match(&cli.txf, tx_id)) continue;
         if (cli.link_id    >= 0 && link_id    != (uint8_t)cli.link_id)    continue;
         if (cli.radio_port >= 0 && radio_port != (uint8_t)cli.radio_port) continue;
+
+        /* Mark last-seen for this tx_id (after filters) */
+        last_seen_ms[tx_id]   = now_ms();
+        last_link_id[tx_id]   = link_id;
+        last_radio_port[tx_id]= radio_port;
 
         /* --- Extract t0 tail (8 bytes ns) from the END of payload --- */
         uint64_t t0_ns = 0;
@@ -755,7 +767,22 @@ stats_tick:
         uint32_t pk = pkts_tx[t];
         uint32_t ls = G[t].lost;
         uint32_t ex = pk + ls;
-        if (ex == 0) continue; /* inactive tx_id in this period */
+        if (ex == 0) {
+          /* No packets and no inferred losses this period. If this tx_id was
+             seen previously, emit a "signal lost" line with channel params. */
+          if (last_seen_ms[t] != 0) {
+            uint64_t idle_ms = t1 - last_seen_ms[t];
+            int ll = (last_link_id[t]   == 0xFF) ? -1 : (int)last_link_id[t];
+            int rp = (last_radio_port[t]== 0xFF) ? -1 : (int)last_radio_port[t];
+            fprintf(stderr,
+              "[TX %03d] dt=%llu ms | signal LOST | idle=%llu ms | link_id=%d | radio_port=%d | rate=0.0 kbps | RSSI = n/a\n",
+              t,
+              (unsigned long long)(t1 - t0),
+              (unsigned long long)idle_ms,
+              ll, rp);
+          }
+          continue; /* nothing else to print for this tx_id */
+        }
 
         /* Aggregate per-TX RSSI over all ifaces/chains for header line.
          * Show MAX of per-chain AVERAGES over the reporting period. */
