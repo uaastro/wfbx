@@ -757,8 +757,11 @@ stats_tick:
         uint32_t ex = pk + ls;
         if (ex == 0) continue; /* inactive tx_id in this period */
 
-        /* Aggregate per-TX RSSI over all ifaces/chains for header line. */
-        int tx_rssi_min = 127, tx_rssi_max = -127; int64_t tx_rssi_sum = 0; uint32_t tx_rssi_samples = 0;
+        /* Aggregate per-TX RSSI over all ifaces/chains for header line.
+         * Show MAX of per-chain AVERAGES over the reporting period. */
+        int tx_rssi_min = 127, tx_rssi_max = -127;
+        int64_t tx_rssi_sum = 0; uint32_t tx_rssi_samples = 0;
+        double tx_best_chain_avg = -127; /* if no samples -> will be set to 0.0 below */
         for (int a=0; a<n_open; ++a) {
           for (int c=0; c<RX_ANT_MAX; ++c) {
             const struct ant_stats* S = &ATX[t][a][c];
@@ -767,16 +770,19 @@ stats_tick:
             if (S->rssi_max > tx_rssi_max) tx_rssi_max = S->rssi_max;
             tx_rssi_sum += S->rssi_sum;
             tx_rssi_samples += S->rssi_samples;
+            /* Per-chain average for this period */
+            double chain_avg = (double)S->rssi_sum / (double)S->rssi_samples;
+            if (chain_avg > tx_best_chain_avg) tx_best_chain_avg = chain_avg;
           }
         }
-        double tx_ravg = (tx_rssi_samples>0) ? ((double)tx_rssi_sum / (double)tx_rssi_samples) : 0.0;
-        if (tx_rssi_samples == 0) { tx_rssi_min = 0; tx_rssi_max = 0; }
+
+       if (tx_rssi_samples == 0) { tx_rssi_min = 0; tx_rssi_max = 0; tx_best_chain_avg = -127; }
         double tx_kbps = seconds > 0.0 ? (bytes_tx[t] * 8.0 / 1000.0) / seconds : 0.0;
         int tx_quality = ex ? (int)((pk * 100.0) / ex + 0.5) : 100;
 
         fprintf(stderr,
           "[TX %03d] dt=%llu ms | pkts=%u lost=%u quality=%d%% | rate=%.1f kbps | RSSI = %.1f dBm\n",
-          t, (unsigned long long)(t1 - t0), pk, ls, tx_quality, tx_kbps, tx_ravg);
+          t, (unsigned long long)(t1 - t0), pk, ls, tx_quality, tx_kbps, tx_best_chain_avg);
 
         /* Per-antenna lines for this tx_id (lost is per IFACE+CHAIN). */
         for (int a=0; a<n_open; ++a) {
