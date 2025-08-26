@@ -544,6 +544,10 @@ int main(int argc, char** argv)
   /* Per-TX packet/bytes counters for the current stats period. */
   uint32_t pkts_tx[MAX_TX_IDS]  = {0};  /* accepted non-duplicates (global) */
   uint64_t bytes_tx[MAX_TX_IDS] = {0};  /* payload bytes minus TS tail */
+
+  /* Global flag: becomes 1 after the very first accepted (non-duplicate) packet.
+   * Used to print an "AWAITING" banner while no packets have ever been seen. */
+  static int g_any_packets_seen = 0;
  
   /* NEW: last-seen bookkeeping (per tx_id) */
   uint64_t last_seen_ms[MAX_TX_IDS] = {0};      /* 0 => never seen */
@@ -667,7 +671,8 @@ int main(int argc, char** argv)
           if (has_t0 && eff_len >= TS_TAIL_BYTES) eff_len -= TS_TAIL_BYTES;
           bytes_tx[tx_id] += (uint64_t)eff_len;
           pkts_tx[tx_id]  += 1;
-
+          /* Mark that at least one valid packet has been seen globally. */
+          g_any_packets_seen = 1;
         /* Per-TX loss tracking: count gaps within each tx_id sequence space. */
           if (!G[tx_id].have_seq) {
             G[tx_id].have_seq = 1;
@@ -762,6 +767,18 @@ stats_tick:
     if (t1 - t0 >= (uint64_t)cli.stat_period_ms) {
       
       double seconds = (double)(t1 - t0) / 1000.0;
+      
+      /* If nothing has ever been received yet, emit an 'AWAITING' banner with channel params. */
+      if (!g_any_packets_seen) {
+        /* Channel params come from current CLI filters: -1 means 'any'. */
+        int ll = (cli.link_id    >= 0) ? cli.link_id    : -1;
+        int rp = (cli.radio_port >= 0) ? cli.radio_port : -1;
+        fprintf(stderr,
+          "[AWAITING] no packets yet | link_id=%d | radio_port=%d\n",
+          ll, rp);
+        /* We still fall through; no per-TX lines will appear because ex==0 for all tx_id. */
+      }
+
       /* Print per-TX blocks. Active means we saw pkts or losses this period. */
       for (int t = 0; t < MAX_TX_IDS; ++t) {
         uint32_t pk = pkts_tx[t];
