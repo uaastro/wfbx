@@ -1,4 +1,4 @@
-// wfb_rx.c — multi-interface 802.11 capture (monitor mode) -> UDP (configurable)
+// wfbx_rx.c — multi-interface 802.11 capture ....
 // - Supports multiple WLAN interfaces (positional args): receive diversity
 // - A frame is accepted if received on at least one interface (dedup by 12-bit seq)
 // - Per-antenna stats labeled ANTabc: a=iface index, bc=antenna index (00..99)

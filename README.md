@@ -1,4 +1,4 @@
-wfbX - wifi broadcast framework with eXtended futures:
+wfbX - wifi broadcast framework with eXtended features:
 
 - UDP traffic encryption
 - UDP FEC

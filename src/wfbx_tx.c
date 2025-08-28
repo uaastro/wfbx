@@ -1,6 +1,6 @@
-// wfb_tx.c — UDP -> 802.11 injection (monitor mode) via Radiotap
+// wfbx_tx.c — UDP -> 802.11 injection ....
 // Preserves CLI and behavior of udp2wfb.c; uses shared defs from wfb_defs.h.
-// Build: gcc -O2 -Wall -o wfb_tx wfb_tx.c -lpcap
+// Build: gcc -O2 -Wall -o wfbx_tx wfbx_tx.c -lpcap
 
 #include <pcap/pcap.h>
 #include <stdio.h>
