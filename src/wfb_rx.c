@@ -424,9 +424,12 @@ int main(int argc, char** argv)
     pcap_t* p = pcap_create(cli.ifname[i], errbuf);
     if (!p) { fprintf(stderr, "pcap_create(%s): %s\n", cli.ifname[i], errbuf); continue; }
     (void)pcap_set_immediate_mode(p, 1);
-    (void)pcap_setnonblock(p, 1, errbuf);
     if (pcap_activate(p) != 0) {
       fprintf(stderr, "pcap_activate(%s): %s\n", cli.ifname[i], pcap_geterr(p));
+      pcap_close(p); continue;
+    }
+    if (pcap_setnonblock(p, 1, errbuf) != 0) {
+      fprintf(stderr, "pcap_setnonblock(%s): %s\n", cli.ifname[i], errbuf);
       pcap_close(p); continue;
     }
     int fd = pcap_get_selectable_fd(p);
