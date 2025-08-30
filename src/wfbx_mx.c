@@ -255,8 +255,8 @@ static inline uint32_t airtime_us_rx(size_t mpdu_len, const struct rt_stats* rs)
 
 enum { TXF_ANY = 0, TXF_INCLUDE = 1, TXF_EXCLUDE = 2 };
 struct txid_filter { int mode; uint64_t map[4]; };
-static void txf_clear_all(struct txid_filter* f){ f->map[0]=f->map[1]=f->map[2]=f->map[3]=0; }
-static int txf_match(const struct txid_filter* f, uint8_t tx){ (void)tx; return f->mode==TXF_ANY ? 1 : 1; }
+static __attribute__((unused)) void txf_clear_all(struct txid_filter* f){ f->map[0]=f->map[1]=f->map[2]=f->map[3]=0; }
+static __attribute__((unused)) int txf_match(const struct txid_filter* f, uint8_t tx){ (void)tx; return f->mode==TXF_ANY ? 1 : 1; }
 
 static volatile int g_run = 1; static void on_sigint(int){ g_run = 0; }
 
@@ -312,7 +312,8 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
   if (optind >= argc) { fprintf(stderr, "Error: missing <wlan_iface>. Use --help for usage.\n"); return -1; }
   for (int i=optind; i<argc && cfg->n_if < MAX_IFS; ++i) cfg->ifname[cfg->n_if++] = argv[i];
   if (cfg->n_if == 0) { fprintf(stderr, "Error: no interfaces.\n"); return -1; }
-  if (cfg->stat_period_ms <= 0) cfg->stat_period_ms = 1000; return 0;
+  if (cfg->stat_period_ms <= 0) cfg->stat_period_ms = 1000;
+  return 0;
 }
 
 int main(int argc, char** argv)
@@ -367,7 +368,8 @@ int main(int argc, char** argv)
     if (sel < 0) { if (errno == EINTR) goto stats_tick; perror("select"); break; }
 
     for (int i=0;i<n_open;i++) {
-      if (fds[i] < 0) continue; if (sel == 0 || !FD_ISSET(fds[i], &rfds)) continue;
+      if (fds[i] < 0) continue;
+      if (sel == 0 || !FD_ISSET(fds[i], &rfds)) continue;
       while (1) {
         struct pcap_pkthdr* hdr = NULL; const u_char* pkt = NULL; int rc = pcap_next_ex(ph[i], &hdr, &pkt); if (rc <= 0) break;
         struct rt_stats rs; if (parse_radiotap_rx(pkt, hdr->caplen, &rs) != 0) continue;
