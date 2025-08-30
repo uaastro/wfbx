@@ -197,9 +197,14 @@ struct wfb_radiotap_tx {
  */
 #pragma pack(push,1)
 struct wfbx_mesh_trailer {
-  uint32_t ts_tx_us_le;  /* 4B, little-endian */
-  uint64_t t0_ns_le;     /* 8B, little-endian */
+  uint32_t ts_tx_us_le;   /* 4B, little-endian */
+  uint64_t t0_ns_le;      /* 8B, little-endian */
+  uint64_t epoch_us_le;   /* 8B, little-endian: TX-defined T_epoch (us, mono raw) */
 };
 #pragma pack(pop)
 
 #define WFBX_TRAILER_BYTES ((unsigned)sizeof(struct wfbx_mesh_trailer))
+
+/* Legacy trailer sizes we may still encounter */
+#define WFBX_TRAILER12_BYTES 12u /* ts_tx(4) + t0_ns(8) */
+#define WFBX_TRAILER8_BYTES   8u /* t0_ns only */

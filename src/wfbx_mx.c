@@ -359,6 +359,15 @@ int main(int argc, char** argv)
   int64_t e_delta_min = INT64_C(0);
   int64_t e_delta_max = INT64_C(0);
   uint64_t e_delta_samples = 0;
+  /* Epoch vs TX-epoch statistics */
+  int64_t e_epoch_inst_sum = 0;
+  int64_t e_epoch_inst_min = INT64_C(0);
+  int64_t e_epoch_inst_max = INT64_C(0);
+  uint64_t e_epoch_inst_samples = 0;
+  int64_t e_epoch_hat_sum = 0;
+  int64_t e_epoch_hat_min = INT64_C(0);
+  int64_t e_epoch_hat_max = INT64_C(0);
+  uint64_t e_epoch_hat_samples = 0;
 
   while (g_run) {
     fd_set rfds; FD_ZERO(&rfds); int maxfd=-1; for (int i=0;i<n_open;i++){ FD_SET(fds[i], &rfds); if (fds[i]>maxfd) maxfd=fds[i]; }
@@ -378,24 +387,32 @@ int main(int argc, char** argv)
         /* Local RX software timestamp (end of delivery) */
         uint64_t t_loc_us = mono_us_raw();
 
-        /* Parse trailer at the end if present */
-        uint32_t TS_tx_us = 0;
-        int have_ts_tx = 0;
-        uint64_t t0_ns = 0;
-        int have_t0 = 0;
+        /* Parse trailer at the end if present; support 20/12/8 bytes */
+        uint32_t TS_tx_us = 0; int have_ts_tx = 0;
+        uint64_t t0_ns = 0;    int have_t0 = 0;
+        uint64_t epoch_tx_us = 0; int have_epoch_tx = 0;
+        size_t trailer_found = 0;
         if (v.payload_len >= WFBX_TRAILER_BYTES) {
           struct wfbx_mesh_trailer tr;
           memcpy(&tr, v.payload + (v.payload_len - WFBX_TRAILER_BYTES), sizeof(tr));
-          TS_tx_us = le32toh(tr.ts_tx_us_le);
-          have_ts_tx = 1;
-          t0_ns = le64toh(tr.t0_ns_le);
-          have_t0 = 1;
-        } else if (v.payload_len >= 8) {
-          /* Legacy 8B tail: only t0_ns */
-          uint64_t t0_le;
+          TS_tx_us = le32toh(tr.ts_tx_us_le); have_ts_tx = 1;
+          t0_ns    = le64toh(tr.t0_ns_le);    have_t0 = 1;
+          epoch_tx_us = le64toh(tr.epoch_us_le); have_epoch_tx = 1;
+          trailer_found = WFBX_TRAILER_BYTES;
+        } else if (v.payload_len >= WFBX_TRAILER12_BYTES) {
+          /* legacy 12B: ts_tx(4) + t0_ns(8) */
+          uint32_t ts_le; uint64_t t0_le;
+          memcpy(&ts_le, v.payload + (v.payload_len - WFBX_TRAILER12_BYTES), 4);
           memcpy(&t0_le, v.payload + (v.payload_len - 8), 8);
-          t0_ns = le64toh(t0_le);
-          have_t0 = 1;
+          TS_tx_us = le32toh(ts_le); have_ts_tx = 1;
+          t0_ns    = le64toh(t0_le); have_t0 = 1;
+          trailer_found = WFBX_TRAILER12_BYTES;
+        } else if (v.payload_len >= WFBX_TRAILER8_BYTES) {
+          /* legacy 8B: t0_ns only */
+          uint64_t t0_le;
+          memcpy(&t0_le, v.payload + (v.payload_len - WFBX_TRAILER8_BYTES), 8);
+          t0_ns = le64toh(t0_le); have_t0 = 1;
+          trailer_found = WFBX_TRAILER8_BYTES;
         }
 
         /* Compute airtime from actual PHY (HT) */
@@ -420,6 +437,21 @@ int main(int argc, char** argv)
             if (hat < 0.0) hat = 0.0;
             epoch_hat_us = (uint64_t)(hat + 0.5);
           }
+          /* If TX epoch present, accumulate e_epoch_instant and e_epoch_hat */
+          if (have_epoch_tx) {
+            int64_t e_inst = (int64_t)T_epoch_instant - (int64_t)epoch_tx_us;
+            if (e_epoch_inst_samples == 0) { e_epoch_inst_min = e_inst; e_epoch_inst_max = e_inst; }
+            if (e_inst < e_epoch_inst_min) e_epoch_inst_min = e_inst;
+            if (e_inst > e_epoch_inst_max) e_epoch_inst_max = e_inst;
+            e_epoch_inst_sum += e_inst;
+            e_epoch_inst_samples++;
+            int64_t e_hat = (int64_t)epoch_hat_us - (int64_t)epoch_tx_us;
+            if (e_epoch_hat_samples == 0) { e_epoch_hat_min = e_hat; e_epoch_hat_max = e_hat; }
+            if (e_hat < e_epoch_hat_min) e_epoch_hat_min = e_hat;
+            if (e_hat > e_epoch_hat_max) e_epoch_hat_max = e_hat;
+            e_epoch_hat_sum += e_hat;
+            e_epoch_hat_samples++;
+          }
         }
 
         /* Real delta_us (host-host), excluding airtime */
@@ -440,9 +472,18 @@ int main(int argc, char** argv)
           e_delta_samples++;
         }
 
-        /* Optional: forward payload without trailer */
+        /* Epoch comparisons against TX-provided epoch (if present) */
+        if (have_epoch_tx && have_ts_tx) {
+          int64_t inst = (int64_t)t_loc_us - (int64_t)cli.delta_us - (int64_t)A_us - (int64_t)cli.tau_us - (int64_t)TS_tx_us;
+          uint64_t T_epoch_instant = (inst < 0) ? 0ull : (uint64_t)inst;
+          int64_t e_epoch_inst = (int64_t)T_epoch_instant - (int64_t)epoch_tx_us;
+          /* reuse e_us_* accumulators? No, keep separate for clarity */
+          /* We'll add dedicated accumulators below. */
+        }
+
+        /* Optional: forward payload without trailer (trim what we actually found) */
         size_t fwd_len = v.payload_len;
-        if (fwd_len >= WFBX_TRAILER_BYTES) fwd_len -= WFBX_TRAILER_BYTES;
+        if (trailer_found > 0 && fwd_len >= trailer_found) fwd_len -= trailer_found;
         (void)sendto(us, v.payload, fwd_len, 0, (struct sockaddr*)&dst, sizeof(dst));
         pkts++;
       }
@@ -463,10 +504,19 @@ stats_tick:
         fprintf(stderr, "      e_us: avg=%.1f min=%lld max=%lld n=%llu | e_delta: avg=%.1f min=%lld max=%lld n=%llu\n",
                 avg_e_us, (long long)e_us_min, (long long)e_us_max, (unsigned long long)e_us_samples,
                 avg_e_delta, (long long)e_delta_min, (long long)e_delta_max, (unsigned long long)e_delta_samples);
+        if (e_epoch_inst_samples > 0 || e_epoch_hat_samples > 0) {
+          double avg_e_epoch_inst = (e_epoch_inst_samples > 0) ? ((double)e_epoch_inst_sum / (double)e_epoch_inst_samples) : 0.0;
+          double avg_e_epoch_hat  = (e_epoch_hat_samples > 0)  ? ((double)e_epoch_hat_sum  / (double)e_epoch_hat_samples)  : 0.0;
+          fprintf(stderr, "      e_epoch_instant: avg=%.1f min=%lld max=%lld n=%llu | e_epoch_hat: avg=%.1f min=%lld max=%lld n=%llu\n",
+                  avg_e_epoch_inst, (long long)e_epoch_inst_min, (long long)e_epoch_inst_max, (unsigned long long)e_epoch_inst_samples,
+                  avg_e_epoch_hat,  (long long)e_epoch_hat_min,  (long long)e_epoch_hat_max,  (unsigned long long)e_epoch_hat_samples);
+        }
         t0 = t1; pkts = 0;
         real_delta_sum = 0; real_delta_samples = 0;
         e_us_sum = 0; e_us_samples = 0;
         e_delta_sum = 0; e_delta_samples = 0;
+        e_epoch_inst_sum = 0; e_epoch_inst_samples = 0;
+        e_epoch_hat_sum = 0;  e_epoch_hat_samples = 0;
       }
     }
   }
