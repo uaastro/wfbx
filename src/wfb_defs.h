@@ -187,3 +187,19 @@ struct wfb_radiotap_tx {
     uint8_t mcs;
   } mcs; /* IEEE80211_RADIOTAP_MCS */
 } __attribute__((packed));
+
+/* ---- Mesh trailer (appended at end of payload) ------------------------- */
+/*
+ * For testing/migration we carry BOTH fields:
+ *  - ts_tx_us_le: 4-byte little-endian offset of frame within current superframe on TX (µs)
+ *  - t0_ns_le   : 8-byte little-endian host CLOCK_MONOTONIC_RAW timestamp at TX (ns)
+ * The trailer is placed as a packed struct at the very end of the payload.
+ */
+#pragma pack(push,1)
+struct wfbx_mesh_trailer {
+  uint32_t ts_tx_us_le;  /* 4B, little-endian */
+  uint64_t t0_ns_le;     /* 8B, little-endian */
+};
+#pragma pack(pop)
+
+#define WFBX_TRAILER_BYTES ((unsigned)sizeof(struct wfbx_mesh_trailer))

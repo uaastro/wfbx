@@ -134,6 +134,10 @@ static uint64_t mono_ns_raw(void) {
 }
 
 
+static inline uint64_t mono_us_raw(void) { return mono_ns_raw() / 1000ull; }
+
+static uint64_t g_epoch_start_us = 0; /* T_epoch start since process start (mono raw, us) */
+
 /* Send one packet (payload) via pcap_inject with given TX params */
 static int send_packet(pcap_t* ph,
                        const uint8_t* payload, size_t payload_len, uint16_t seq_num,
@@ -151,13 +155,17 @@ static int send_packet(pcap_t* ph,
     memcpy(frame + pos, payload, payload_len);
     pos += payload_len;
   }
- /* Append t0_ns tail (LE) as 8 bytes */
-    uint8_t* p = frame;
-    p +=pos; 
-    uint64_t t0 = mono_ns_raw();
-    uint64_t t0_le = htole64(t0);
-    memcpy(p, &t0_le, sizeof(t0_le)); 
-    pos += sizeof(t0_le);
+  /* Append mesh trailer: 4B TS_tx (us, LE) + 8B t0_ns (LE) */
+  {
+    struct wfbx_mesh_trailer tr;
+    uint64_t now_us = mono_us_raw();
+    uint32_t ts_tx = (uint32_t)(now_us - g_epoch_start_us);
+    tr.ts_tx_us_le = htole32(ts_tx);
+    tr.t0_ns_le    = htole64(mono_ns_raw());
+    if (pos + sizeof(tr) > sizeof(frame)) return -1;
+    memcpy(frame + pos, &tr, sizeof(tr));
+    pos += sizeof(tr);
+  }
 
   int ret = pcap_inject(ph, frame, (int)pos);
   return ret;
@@ -247,6 +255,8 @@ int main(int argc, char** argv) {
   }
 
   signal(SIGINT, on_sigint);
+  /* Define local T_epoch as process start time */
+  g_epoch_start_us = mono_us_raw();
 
   fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d\n",
           ip, port, iface, mcs_idx, gi_short?"short":"long", bw40?"40":"20",
