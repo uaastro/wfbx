@@ -494,13 +494,13 @@ stats_tick:
         fprintf(stderr, "      real_delta_us: avg=%.1f min=%lld max=%lld n=%llu\n",
                 avg_real_du, (long long)real_delta_min, (long long)real_delta_max,
                 (unsigned long long)real_delta_samples);
-        fprintf(stderr, "      e_us: avg=%.1f min=%lld max=%lld n=%llu | e_delta: avg=%.1f min=%lld max=%lld n=%llu\n",
+        fprintf(stderr, "      e_us: avg=%.1f min=%lld max=%lld n=%llu |\ne_delta: avg=%.1f min=%lld max=%lld n=%llu\n",
                 avg_e_us, (long long)e_us_min, (long long)e_us_max, (unsigned long long)e_us_samples,
                 avg_e_delta, (long long)e_delta_min, (long long)e_delta_max, (unsigned long long)e_delta_samples);
         if (e_epoch_inst_samples > 0 || e_epoch_hat_samples > 0) {
           double avg_e_epoch_inst = (e_epoch_inst_samples > 0) ? ((double)e_epoch_inst_sum / (double)e_epoch_inst_samples) : 0.0;
           double avg_e_epoch_hat  = (e_epoch_hat_samples > 0)  ? ((double)e_epoch_hat_sum  / (double)e_epoch_hat_samples)  : 0.0;
-          fprintf(stderr, "      e_epoch_instant: avg=%.1f min=%lld max=%lld n=%llu | e_epoch_hat: avg=%.1f min=%lld max=%lld n=%llu\n",
+          fprintf(stderr, "      e_epoch_instant: avg=%.1f min=%lld max=%lld n=%llu |\ne_epoch_hat: avg=%.1f min=%lld max=%lld n=%llu\n",
                   avg_e_epoch_inst, (long long)e_epoch_inst_min, (long long)e_epoch_inst_max, (unsigned long long)e_epoch_inst_samples,
                   avg_e_epoch_hat,  (long long)e_epoch_hat_min,  (long long)e_epoch_hat_max,  (unsigned long long)e_epoch_hat_samples);
         }
