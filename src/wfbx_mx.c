@@ -472,14 +472,7 @@ int main(int argc, char** argv)
           e_delta_samples++;
         }
 
-        /* Epoch comparisons against TX-provided epoch (if present) */
-        if (have_epoch_tx && have_ts_tx) {
-          int64_t inst = (int64_t)t_loc_us - (int64_t)cli.delta_us - (int64_t)A_us - (int64_t)cli.tau_us - (int64_t)TS_tx_us;
-          uint64_t T_epoch_instant = (inst < 0) ? 0ull : (uint64_t)inst;
-          int64_t e_epoch_inst = (int64_t)T_epoch_instant - (int64_t)epoch_tx_us;
-          /* reuse e_us_* accumulators? No, keep separate for clarity */
-          /* We'll add dedicated accumulators below. */
-        }
+        /* Epoch comparisons against TX-provided epoch handled above when computing EMA */
 
         /* Optional: forward payload without trailer (trim what we actually found) */
         size_t fwd_len = v.payload_len;
