@@ -167,6 +167,7 @@ static struct sockaddr_un g_mx_addr; static socklen_t g_mx_addr_len;
 static char g_tx_name[108] = {0};
 static char g_mx_name[108] = {0};
 static uint32_t g_ctrl_seq = 0;
+static int g_ctrl_enabled = 0; /* control sync disabled by default */
 
 static void uds_build_addr(const char* name_in, struct sockaddr_un* sa, socklen_t* sl_out, char* out_norm, size_t out_sz)
 {
@@ -182,6 +183,7 @@ static void uds_build_addr(const char* name_in, struct sockaddr_un* sa, socklen_
 
 static int ctrl_init(const char* mx_name, uint8_t tx_id)
 {
+  if (!g_ctrl_enabled) return 0;
   g_cs = socket(AF_UNIX, SOCK_DGRAM, 0);
   if (g_cs < 0) return -1;
   pid_t pid = getpid();
@@ -203,6 +205,7 @@ static int ctrl_init(const char* mx_name, uint8_t tx_id)
 
 static __attribute__((unused)) void ctrl_drain(void)
 {
+  if (!g_ctrl_enabled) return;
   if (g_cs < 0) return;
   uint8_t buf[256];
   ssize_t n;
@@ -359,6 +362,14 @@ static uint8_t g_group_id = 0, g_tx_id = 0, g_link_id = 0, g_radio_port = 0;
 static uint64_t g_pending_epoch_us = 0;
 static int g_pending_epoch_valid = 0;
 
+/* Stats */
+static int g_stat_period_ms = 1000;
+static uint64_t g_rx_t0_ms = 0;
+static uint64_t g_rx_count_period = 0;
+static uint64_t g_sent_in_window = 0;
+static uint64_t g_drop_in_window = 0;
+static int g_window_reported = 0;
+
 static void* thr_udp_rx(void* arg)
 {
   (void)arg;
@@ -368,12 +379,22 @@ static void* thr_udp_rx(void* arg)
     if (n < 0) { if (errno==EINTR) continue; if (errno==EAGAIN||errno==EWOULDBLOCK){ usleep(1000); continue; } perror("recv"); break; }
     if (n == 0) continue;
     ring_push(buf, (size_t)n);
+    /* RX stats per period */
+    uint64_t now_ms_local = (uint64_t)(mono_us_raw() / 1000ull);
+    if (g_rx_t0_ms == 0) g_rx_t0_ms = now_ms_local;
+    g_rx_count_period++;
+    if (now_ms_local - g_rx_t0_ms >= (uint64_t)g_stat_period_ms) {
+      fprintf(stderr, "[UDP RX] dt=%d ms | pkts=%llu\n", g_stat_period_ms, (unsigned long long)g_rx_count_period);
+      g_rx_t0_ms = now_ms_local;
+      g_rx_count_period = 0;
+    }
   }
   return NULL;
 }
 
 static void* thr_ctrl(void* arg)
 {
+  if (!g_ctrl_enabled) return NULL;
   (void)arg;
   uint8_t buf[256];
   while (g_run) {
@@ -414,12 +435,14 @@ static void* thr_sched(void* arg)
     int advanced = epoch_switch_if_needed(now);
     if (advanced) {
       /* Apply pending epoch correction (if any) exactly at boundary */
-      uint64_t pending = 0; int have = 0;
-      pthread_mutex_lock(&g_epoch.mtx);
-      if (g_pending_epoch_valid) { pending = g_pending_epoch_us; have = 1; g_pending_epoch_valid = 0; }
-      pthread_mutex_unlock(&g_epoch.mtx);
-      if (have) {
-        epoch_adjust_from_mx(pending);
+      if (g_ctrl_enabled) {
+        uint64_t pending = 0; int have = 0;
+        pthread_mutex_lock(&g_epoch.mtx);
+        if (g_pending_epoch_valid) { pending = g_pending_epoch_us; have = 1; g_pending_epoch_valid = 0; }
+        pthread_mutex_unlock(&g_epoch.mtx);
+        if (have) {
+          epoch_adjust_from_mx(pending);
+        }
       }
     }
 
@@ -434,6 +457,10 @@ static void* thr_sched(void* arg)
       uint64_t dt = T_open - now; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL); continue;
     }
     if (now > T_close) {
+      if (!g_window_reported) {
+        fprintf(stderr, "[SCHED] window sent=%llu drop=%llu\n", (unsigned long long)g_sent_in_window, (unsigned long long)g_drop_in_window);
+        g_window_reported = 1;
+      }
       uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL); continue;
     }
 
@@ -441,15 +468,12 @@ static void* thr_sched(void* arg)
 
     uint32_t A_us = airtime_us_tx(p.len + (size_t)WFBX_TRAILER_BYTES, g_mcs_idx, g_gi_short, g_bw40, g_stbc);
     now = mono_us_raw();
-    if (now + g_delta_us + A_us + g_tau_max_us + g_eps_us > T_close) {
-      /* cannot fit; drop to keep scheduler simple */
-      continue;
-    }
+    if (now + g_delta_us + A_us + g_tau_max_us + g_eps_us > T_close) { g_drop_in_window++; continue; }
 
     int ret = send_packet(g_ph, p.data, p.len, g_seq,
                           (uint8_t)g_mcs_idx, g_gi_short, g_bw40, g_ldpc, g_stbc,
                           g_group_id, g_tx_id, g_link_id, g_radio_port);
-    if (ret >= 0) g_seq = (uint16_t)((g_seq + 1) & 0x0fff);
+    if (ret >= 0) { g_seq = (uint16_t)((g_seq + 1) & 0x0fff); g_sent_in_window++; }
   }
   return NULL;
 }
@@ -562,6 +586,14 @@ int main(int argc, char** argv) {
     }
   }
 
+  /* Optional env to enable control sync: WFBX_CTRL=1 */
+  const char* ctrl_env = getenv("WFBX_CTRL");
+  if (ctrl_env && atoi(ctrl_env) != 0) g_ctrl_enabled = 1;
+
+  /* Stats period (env) */
+  const char* sp = getenv("WFBX_STAT_MS");
+  if (sp) { int v = atoi(sp); if (v > 0 && v <= 60000) g_stat_period_ms = v; }
+
   if (optind >= argc) {
     fprintf(stderr, "Usage: sudo %s [--ip 0.0.0.0] [--port 5600] [--mcs_idx N] [--gi short|long] [--bw 20|40]\n"
                     "                [--ldpc 0|1] [--stbc 0..3] [--group_id G] [--tx_id T] [--link_id L] [--radio_port P] <wlan_iface>\n",
@@ -593,7 +625,8 @@ int main(int argc, char** argv) {
   signal(SIGINT, on_sigint);
   /* Define local T_epoch as process start time; may be overridden by MX */
   g_epoch_start_us = mono_us_raw();
-  (void)ctrl_init(mx_addr_cli, (uint8_t)tx_id);
+  /* Control sync disabled by default */
+  if (g_ctrl_enabled) (void)ctrl_init(mx_addr_cli, (uint8_t)tx_id);
   /* Derive tau_max_us from d_max (km): c≈299792.458 km/s ⇒ 3.335641 µs/km */
   if (g_d_max_km > 0.0) {
     double tau = g_d_max_km * 3.335641; /* us */
@@ -624,12 +657,12 @@ int main(int argc, char** argv) {
 
   pthread_t th_rx, th_ctrl, th_sched;
   pthread_create(&th_rx, NULL, thr_udp_rx, NULL);
-  pthread_create(&th_ctrl, NULL, thr_ctrl, NULL);
+  if (g_ctrl_enabled) pthread_create(&th_ctrl, NULL, thr_ctrl, NULL);
   pthread_create(&th_sched, NULL, thr_sched, NULL);
 
   /* Join until SIGINT */
   pthread_join(th_rx, NULL);
-  pthread_join(th_ctrl, NULL);
+  if (g_ctrl_enabled) pthread_join(th_ctrl, NULL);
   pthread_join(th_sched, NULL);
 
   if (g_ph) pcap_close(g_ph);
