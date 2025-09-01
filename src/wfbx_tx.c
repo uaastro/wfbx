@@ -259,6 +259,22 @@ static int ring_pop(pkt_t* out)
   return 1;
 }
 
+/* Push a packet back to the head (front) of the ring. Assumes there is space. */
+static void ring_push_front(const pkt_t* in)
+{
+  if (!in) return;
+  pthread_mutex_lock(&g_rmtx);
+  /* If full (shouldn't be right after a pop), wait just in case */
+  while (g_rcount == RING_SIZE && g_run) pthread_cond_wait(&g_rcond_nonfull, &g_rmtx);
+  if (!g_run) { pthread_mutex_unlock(&g_rmtx); return; }
+  /* Move head backwards and place packet */
+  g_rhead = (g_rhead == 0) ? (RING_SIZE - 1) : (g_rhead - 1);
+  g_ring[g_rhead] = *in;
+  g_rcount++;
+  pthread_cond_signal(&g_rcond_nonempty);
+  pthread_mutex_unlock(&g_rmtx);
+}
+
 /* ---- Epoch triple with mutex ---- */
 typedef struct {
   uint64_t prev_us, cur_us, next_us;
@@ -368,7 +384,6 @@ static uint64_t g_rx_t0_ms = 0;
 static uint64_t g_rx_count_period = 0;
 static uint64_t g_sent_in_window = 0;
 static uint64_t g_drop_in_window = 0;
-static int g_window_reported = 0;
 
 static void* thr_udp_rx(void* arg)
 {
@@ -376,13 +391,15 @@ static void* thr_udp_rx(void* arg)
   uint8_t buf[MAX_UDP_PAYLOAD];
   while (g_run) {
     ssize_t n = recv(g_usock, buf, sizeof(buf), 0);
+    g_rx_count_period++;
     if (n < 0) { if (errno==EINTR) continue; if (errno==EAGAIN||errno==EWOULDBLOCK){ usleep(1000); continue; } perror("recv"); break; }
     if (n == 0) continue;
     ring_push(buf, (size_t)n);
     /* RX stats per period */
     uint64_t now_ms_local = (uint64_t)(mono_us_raw() / 1000ull);
-    if (g_rx_t0_ms == 0) g_rx_t0_ms = now_ms_local;
-    g_rx_count_period++;
+    if (g_rx_t0_ms == 0) {
+      g_rx_t0_ms = now_ms_local;
+    }
     if (now_ms_local - g_rx_t0_ms >= (uint64_t)g_stat_period_ms) {
       fprintf(stderr, "[UDP RX] dt=%d ms | pkts=%llu\n", g_stat_period_ms, (unsigned long long)g_rx_count_period);
       g_rx_t0_ms = now_ms_local;
@@ -434,6 +451,12 @@ static void* thr_sched(void* arg)
     uint64_t now = mono_us_raw();
     int advanced = epoch_switch_if_needed(now);
     if (advanced) {
+      /* window boundary: report and reset per-window stats */
+      fprintf(stderr, "[SCHED] window sent=%llu drop=%llu\n",
+              (unsigned long long)g_sent_in_window,
+              (unsigned long long)g_drop_in_window);
+      g_sent_in_window = 0;
+      g_drop_in_window = 0;
       /* Apply pending epoch correction (if any) exactly at boundary */
       if (g_ctrl_enabled) {
         uint64_t pending = 0; int have = 0;
@@ -456,19 +479,22 @@ static void* thr_sched(void* arg)
     if (now < T_open) {
       uint64_t dt = T_open - now; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL); continue;
     }
-    if (now > T_close) {
-      if (!g_window_reported) {
-        fprintf(stderr, "[SCHED] window sent=%llu drop=%llu\n", (unsigned long long)g_sent_in_window, (unsigned long long)g_drop_in_window);
-        g_window_reported = 1;
-      }
-      uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL); continue;
-    }
+    if (now > T_close) { uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL); continue; }
 
     pkt_t p; if (!ring_pop(&p)) continue;
 
     uint32_t A_us = airtime_us_tx(p.len + (size_t)WFBX_TRAILER_BYTES, g_mcs_idx, g_gi_short, g_bw40, g_stbc);
     now = mono_us_raw();
-    if (now + g_delta_us + A_us + g_tau_max_us + g_eps_us > T_close) { g_drop_in_window++; continue; }
+    if (now + g_delta_us + A_us + g_tau_max_us + g_eps_us > T_close) {
+      /* Put the packet back to the front so it goes first in the next window */
+      ring_push_front(&p);
+      g_drop_in_window++;
+      /* Sleep until next superframe to avoid busy loop */
+      uint64_t dt = (T_next > now) ? (T_next - now) : 1000;
+      struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)};
+      nanosleep(&ts, NULL);
+      continue;
+    }
 
     int ret = send_packet(g_ph, p.data, p.len, g_seq,
                           (uint8_t)g_mcs_idx, g_gi_short, g_bw40, g_ldpc, g_stbc,
