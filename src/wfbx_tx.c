@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <pthread.h>
+#include <math.h>
 
 #ifdef __linux__
   #include <endian.h>
@@ -130,6 +131,12 @@ static size_t build_dot11(uint8_t* out, uint16_t seq, uint8_t group_id, uint8_t 
   memcpy(out, &h, sizeof(h));
   return sizeof(h);
 }
+
+/* Forward declaration for send_packet used by scheduler */
+static int send_packet(pcap_t* ph,
+                       const uint8_t* payload, size_t payload_len, uint16_t seq_num,
+                       uint8_t mcs_idx, int gi_short, int bw40, int ldpc, int stbc,
+                       uint8_t group_id, uint8_t tx_id, uint8_t link_id, uint8_t radio_port);
 
 static uint64_t mono_ns_raw(void) {
   struct timespec ts;
@@ -318,7 +325,8 @@ static const double ht_mbps_tx[2][2][8] = {
 
 static uint32_t airtime_us_tx(size_t mpdu_len, int mcs_idx, int gi_short, int bw40, int stbc)
 {
-  if (mcs_idx < 0) mcs_idx = 0; if (mcs_idx > 31) mcs_idx = 31;
+  if (mcs_idx < 0) mcs_idx = 0;
+  if (mcs_idx > 31) mcs_idx = 31;
   int nss = (mcs_idx / 8) + 1; if (nss < 1) nss = 1; if (nss > 4) nss = 4;
   int mod = mcs_idx % 8;
   int sgi = gi_short ? 1 : 0; int b40 = bw40 ? 1 : 0;
@@ -333,7 +341,8 @@ static uint32_t airtime_us_tx(size_t mpdu_len, int mcs_idx, int gi_short, int bw
   double t_data_rounded = (double)nsym * t_sym;
   double t_preamble = 36.0 + 4.0 * (double)(nss - 1);
   double total = t_preamble + t_data_rounded;
-  if (total < 0.0) total = 0.0; if (total > (double)UINT32_MAX) total = (double)UINT32_MAX;
+  if (total < 0.0) total = 0.0;
+  if (total > (double)UINT32_MAX) total = (double)UINT32_MAX;
   return (uint32_t)(total + 0.5);
 }
 

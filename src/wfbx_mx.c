@@ -19,6 +19,8 @@
 #include <unistd.h>
 #include <time.h>
 #include <ctype.h>
+#include <sys/un.h>
+#include <fcntl.h>
 
 #ifdef __linux__
   #include <endian.h>
