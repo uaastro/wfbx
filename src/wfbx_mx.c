@@ -392,8 +392,11 @@ int main(int argc, char** argv)
   if (cli.ctrl_addr && *cli.ctrl_addr) {
     memset(&mx_sa, 0, sizeof(mx_sa)); mx_sa.sun_family = AF_UNIX; mx_sa.sun_path[0] = '\0';
     const char* nm = cli.ctrl_addr; if (nm[0] == '@') nm++;
-    strncpy(mx_sa.sun_path+1, nm, sizeof(mx_sa.sun_path)-2);
-    mx_sl = (socklen_t)offsetof(struct sockaddr_un, sun_path) + 1 + (socklen_t)strlen(nm);
+    size_t maxpath = sizeof(mx_sa.sun_path) - 2;
+    size_t nmlen = strlen(nm);
+    if (nmlen > maxpath) nmlen = maxpath;
+    if (nmlen > 0) memcpy(mx_sa.sun_path+1, nm, nmlen);
+    mx_sl = (socklen_t)offsetof(struct sockaddr_un, sun_path) + 1 + (socklen_t)nmlen;
     cs = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (cs >= 0) {
       if (bind(cs, (struct sockaddr*)&mx_sa, mx_sl) != 0) { perror("ctrl bind"); close(cs); cs = -1; }
@@ -421,11 +424,13 @@ int main(int argc, char** argv)
         if (h->magic == WFBX_CTRL_MAGIC && h->ver == WFBX_CTRL_VER && h->type == WFBX_CTRL_SUB && (size_t)n >= sizeof(struct wfbx_ctrl_sub)) {
           const struct wfbx_ctrl_sub* s = (const struct wfbx_ctrl_sub*)bufc;
           struct sockaddr_un sa; socklen_t sl; memset(&sa,0,sizeof(sa)); sa.sun_family=AF_UNIX; sa.sun_path[0]='\0';
-          const char* nm2 = s->name; if (nm2 && nm2[0]=='@') nm2++;
-          strncpy(sa.sun_path+1, nm2?nm2:"", sizeof(sa.sun_path)-2);
-          sl = (socklen_t)offsetof(struct sockaddr_un, sun_path) + 1 + (socklen_t)strlen(nm2?nm2:"");
+          const char* nm2 = s->name; if (!nm2) nm2 = ""; if (nm2[0]=='@') nm2++;
+          size_t maxpath2 = sizeof(sa.sun_path) - 2; size_t plen = strlen(nm2);
+          if (plen > maxpath2) plen = maxpath2;
+          if (plen > 0) memcpy(sa.sun_path+1, nm2, plen);
+          sl = (socklen_t)offsetof(struct sockaddr_un, sun_path) + 1 + (socklen_t)plen;
           int placed = 0; for (int k=0;k<64;k++) if (subs[k].active && strcmp(subs[k].name, nm2?nm2:"")==0) { subs[k].sa=sa; subs[k].sl=sl; placed=1; break; }
-          if (!placed) for (int k=0;k<64;k++) if (!subs[k].active) { subs[k].active=1; subs[k].sa=sa; subs[k].sl=sl; strncpy(subs[k].name, nm2?nm2:"", sizeof(subs[k].name)-1); subs[k].name[sizeof(subs[k].name)-1]=0; break; }
+          if (!placed) for (int k=0;k<64;k++) if (!subs[k].active) { subs[k].active=1; subs[k].sa=sa; subs[k].sl=sl; snprintf(subs[k].name, sizeof(subs[k].name), "%s", nm2?nm2:""); break; }
         }
       }
     }

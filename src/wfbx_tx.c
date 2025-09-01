@@ -193,7 +193,10 @@ static int ctrl_init(const char* mx_name, uint8_t tx_id)
   /* Send SUB */
   struct wfbx_ctrl_sub sub; memset(&sub, 0, sizeof(sub));
   sub.h.magic = WFBX_CTRL_MAGIC; sub.h.ver = WFBX_CTRL_VER; sub.h.type = WFBX_CTRL_SUB; sub.h.seq = ++g_ctrl_seq;
-  sub.tx_id = tx_id; snprintf(sub.name, sizeof(sub.name), "@%s", g_tx_name);
+  sub.tx_id = tx_id;
+  /* Safely prefix '@' and cap length to avoid truncation warnings */
+  size_t maxcopy = sizeof(sub.name) - 2; /* '@' + up to maxcopy chars + NUL */
+  snprintf(sub.name, sizeof(sub.name), "@%.*s", (int)maxcopy, g_tx_name);
   (void)sendto(g_cs, &sub, sizeof(sub), 0, (struct sockaddr*)&g_mx_addr, g_mx_addr_len);
   return 0;
 }
