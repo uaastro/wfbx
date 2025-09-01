@@ -14,6 +14,10 @@
 #include <getopt.h>
 #include <stdlib.h>
 #include <time.h>
+#include <sys/un.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <pthread.h>
 
 #ifdef __linux__
   #include <endian.h>
@@ -138,6 +142,306 @@ static inline uint64_t mono_us_raw(void) { return mono_ns_raw() / 1000ull; }
 
 static uint64_t g_epoch_start_us = 0; /* T_epoch start since process start (mono raw, us) */
 
+/* Mesh timing params (TX side) */
+static uint32_t g_epoch_len_us = 50000;
+static uint32_t g_epoch_gi_us  = 400;
+static uint32_t g_slot_start_us = 0;
+static uint32_t g_slot_len_us   = 50000;
+static uint32_t g_gi_tx_us      = 400;
+static uint32_t g_delta_us      = 1500;
+static uint32_t g_tau_max_us    = 0;
+static uint32_t g_eps_us        = 250;
+static double   g_d_max_km      = 0.0; /* CLI: max distance; drives g_tau_max_us */
+
+/* Control socket (UDS DGRAM) */
+static int g_cs = -1;
+static struct sockaddr_un g_tx_addr; static socklen_t g_tx_addr_len;
+static struct sockaddr_un g_mx_addr; static socklen_t g_mx_addr_len;
+static char g_tx_name[108] = {0};
+static char g_mx_name[108] = {0};
+static uint32_t g_ctrl_seq = 0;
+
+static void uds_build_addr(const char* name_in, struct sockaddr_un* sa, socklen_t* sl_out, char* out_norm, size_t out_sz)
+{
+  if (!sa || !sl_out) return;
+  memset(sa, 0, sizeof(*sa)); sa->sun_family = AF_UNIX;
+  const char* nm = name_in ? name_in : "@wfbx.mx";
+  if (nm[0] == '@') nm++;
+  if (out_norm && out_sz) { snprintf(out_norm, out_sz, "%s", (nm && *nm)?nm:"wfbx"); }
+  sa->sun_path[0] = '\0';
+  if (nm && *nm) strncpy(sa->sun_path+1, nm, sizeof(sa->sun_path)-2);
+  *sl_out = (socklen_t)offsetof(struct sockaddr_un, sun_path) + 1 + (socklen_t)strlen(nm?nm:"");
+}
+
+static int ctrl_init(const char* mx_name, uint8_t tx_id)
+{
+  g_cs = socket(AF_UNIX, SOCK_DGRAM, 0);
+  if (g_cs < 0) return -1;
+  pid_t pid = getpid();
+  char local[96]; snprintf(local, sizeof(local), "@wfbx.tx.%u.%d", (unsigned)tx_id, (int)pid);
+  uds_build_addr(local, &g_tx_addr, &g_tx_addr_len, g_tx_name, sizeof(g_tx_name));
+  if (bind(g_cs, (struct sockaddr*)&g_tx_addr, g_tx_addr_len) != 0) { perror("ctrl bind"); close(g_cs); g_cs=-1; return -1; }
+  int fl = fcntl(g_cs, F_GETFL, 0); if (fl >= 0) fcntl(g_cs, F_SETFL, fl | O_NONBLOCK);
+  uds_build_addr(mx_name?mx_name:"@wfbx.mx", &g_mx_addr, &g_mx_addr_len, g_mx_name, sizeof(g_mx_name));
+  /* Send SUB */
+  struct wfbx_ctrl_sub sub; memset(&sub, 0, sizeof(sub));
+  sub.h.magic = WFBX_CTRL_MAGIC; sub.h.ver = WFBX_CTRL_VER; sub.h.type = WFBX_CTRL_SUB; sub.h.seq = ++g_ctrl_seq;
+  sub.tx_id = tx_id; snprintf(sub.name, sizeof(sub.name), "@%s", g_tx_name);
+  (void)sendto(g_cs, &sub, sizeof(sub), 0, (struct sockaddr*)&g_mx_addr, g_mx_addr_len);
+  return 0;
+}
+
+static __attribute__((unused)) void ctrl_drain(void)
+{
+  if (g_cs < 0) return;
+  uint8_t buf[256];
+  ssize_t n;
+  while ((n = recv(g_cs, buf, sizeof(buf), 0)) > 0) {
+    if ((size_t)n >= sizeof(struct wfbx_ctrl_hdr)) {
+      const struct wfbx_ctrl_hdr* h = (const struct wfbx_ctrl_hdr*)buf;
+      if (h->magic == WFBX_CTRL_MAGIC && h->ver == WFBX_CTRL_VER && h->type == WFBX_CTRL_EPOCH && (size_t)n >= sizeof(struct wfbx_ctrl_epoch)) {
+        const struct wfbx_ctrl_epoch* m = (const struct wfbx_ctrl_epoch*)buf;
+        (void)m; /* ctrl_drain unused in threaded mode */
+      }
+    }
+  }
+}
+
+/* ---- Simple ring buffer for UDP packets ---- */
+typedef struct {
+  size_t len;
+  uint8_t data[MAX_UDP_PAYLOAD];
+} pkt_t;
+
+#define RING_SIZE 1024
+static pkt_t g_ring[RING_SIZE];
+static size_t g_rhead = 0, g_rtail = 0, g_rcount = 0;
+static pthread_mutex_t g_rmtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_rcond_nonempty = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t g_rcond_nonfull  = PTHREAD_COND_INITIALIZER;
+
+static void ring_push(const uint8_t* data, size_t len)
+{
+  pthread_mutex_lock(&g_rmtx);
+  while (g_rcount == RING_SIZE && g_run) pthread_cond_wait(&g_rcond_nonfull, &g_rmtx);
+  if (!g_run) { pthread_mutex_unlock(&g_rmtx); return; }
+  g_ring[g_rtail].len = len > MAX_UDP_PAYLOAD ? MAX_UDP_PAYLOAD : len;
+  memcpy(g_ring[g_rtail].data, data, g_ring[g_rtail].len);
+  g_rtail = (g_rtail + 1) % RING_SIZE;
+  g_rcount++;
+  pthread_cond_signal(&g_rcond_nonempty);
+  pthread_mutex_unlock(&g_rmtx);
+}
+
+static int ring_pop(pkt_t* out)
+{
+  pthread_mutex_lock(&g_rmtx);
+  while (g_rcount == 0 && g_run) pthread_cond_wait(&g_rcond_nonempty, &g_rmtx);
+  if (!g_run) { pthread_mutex_unlock(&g_rmtx); return 0; }
+  *out = g_ring[g_rhead];
+  g_rhead = (g_rhead + 1) % RING_SIZE;
+  g_rcount--;
+  pthread_cond_signal(&g_rcond_nonfull);
+  pthread_mutex_unlock(&g_rmtx);
+  return 1;
+}
+
+/* ---- Epoch triple with mutex ---- */
+typedef struct {
+  uint64_t prev_us, cur_us, next_us;
+  uint32_t len_us, gi_us; /* superframe params */
+  pthread_mutex_t mtx;
+} epoch_state_t;
+
+static epoch_state_t g_epoch = {0,0,0,50000,0,PTHREAD_MUTEX_INITIALIZER};
+
+static inline uint64_t sf_total(const epoch_state_t* e){ return (uint64_t)e->len_us + (uint64_t)e->gi_us; }
+
+static void epoch_init_from_start(uint64_t epoch_start_us)
+{
+  pthread_mutex_lock(&g_epoch.mtx);
+  g_epoch.cur_us = epoch_start_us;
+  g_epoch.prev_us = epoch_start_us - sf_total(&g_epoch);
+  g_epoch.next_us = epoch_start_us + sf_total(&g_epoch);
+  pthread_mutex_unlock(&g_epoch.mtx);
+}
+
+static int epoch_switch_if_needed(uint64_t now_us)
+{
+  pthread_mutex_lock(&g_epoch.mtx);
+  uint64_t T = sf_total(&g_epoch);
+  int advanced = 0;
+  while (now_us >= g_epoch.next_us) {
+    g_epoch.prev_us = g_epoch.cur_us;
+    g_epoch.cur_us = g_epoch.next_us;
+    g_epoch.next_us = g_epoch.cur_us + T;
+    advanced = 1;
+  }
+  g_epoch_start_us = g_epoch.cur_us;
+  pthread_mutex_unlock(&g_epoch.mtx);
+  return advanced;
+}
+
+static void epoch_adjust_from_mx(uint64_t epoch_mx_us)
+{
+  pthread_mutex_lock(&g_epoch.mtx);
+  uint64_t T = sf_total(&g_epoch);
+  if (T == 0) { pthread_mutex_unlock(&g_epoch.mtx); return; }
+  int64_t diff = (int64_t)g_epoch.cur_us - (int64_t)epoch_mx_us;
+  int64_t k = llround((double)diff / (double)T);
+  uint64_t near = (uint64_t)((int64_t)epoch_mx_us + k*(int64_t)T);
+  uint64_t dprev = (g_epoch.prev_us > near) ? (g_epoch.prev_us - near) : (near - g_epoch.prev_us);
+  uint64_t dcur  = (g_epoch.cur_us  > near) ? (g_epoch.cur_us  - near) : (near - g_epoch.cur_us);
+  uint64_t dnext = (g_epoch.next_us > near) ? (g_epoch.next_us - near) : (near - g_epoch.next_us);
+  if (dprev <= dcur && dprev <= dnext) {
+    g_epoch.prev_us = near;
+    g_epoch.cur_us  = g_epoch.prev_us + T;
+    g_epoch.next_us = g_epoch.cur_us + T;
+  } else if (dcur <= dnext) {
+    g_epoch.cur_us  = near;
+    g_epoch.prev_us = g_epoch.cur_us - T;
+    g_epoch.next_us = g_epoch.cur_us + T;
+  } else {
+    g_epoch.next_us = near;
+    g_epoch.cur_us  = g_epoch.next_us - T;
+    g_epoch.prev_us = g_epoch.cur_us - T;
+  }
+  g_epoch_start_us = g_epoch.cur_us;
+  pthread_mutex_unlock(&g_epoch.mtx);
+}
+
+/* ---- TX airtime estimation (HT only) ---- */
+static const double ht_mbps_tx[2][2][8] = {
+  { {6.5, 13.0, 19.5, 26.0, 39.0, 52.0, 58.5, 65.0}, {7.2, 14.4, 21.7, 28.9, 43.3, 57.8, 65.0, 72.2} },
+  { {13.5,27.0, 40.5, 54.0, 81.0,108.0,121.5,135.0}, {15.0, 30.0, 45.0, 60.0, 90.0,120.0,135.0,150.0} }
+};
+
+static uint32_t airtime_us_tx(size_t mpdu_len, int mcs_idx, int gi_short, int bw40, int stbc)
+{
+  if (mcs_idx < 0) mcs_idx = 0; if (mcs_idx > 31) mcs_idx = 31;
+  int nss = (mcs_idx / 8) + 1; if (nss < 1) nss = 1; if (nss > 4) nss = 4;
+  int mod = mcs_idx % 8;
+  int sgi = gi_short ? 1 : 0; int b40 = bw40 ? 1 : 0;
+  double base = ht_mbps_tx[b40][sgi][mod];
+  double rate = base * nss;
+  if (rate <= 0.0) return 0;
+  double bits = 8.0 * (double)mpdu_len + 22.0;
+  double t_sym = sgi ? 3.6 : 4.0;
+  double t_data = bits / rate;
+  uint64_t nsym = (uint64_t)((t_data + t_sym - 1e-9) / t_sym);
+  if (nsym * t_sym < t_data) nsym += 1;
+  double t_data_rounded = (double)nsym * t_sym;
+  double t_preamble = 36.0 + 4.0 * (double)(nss - 1);
+  double total = t_preamble + t_data_rounded;
+  if (total < 0.0) total = 0.0; if (total > (double)UINT32_MAX) total = (double)UINT32_MAX;
+  return (uint32_t)(total + 0.5);
+}
+
+/* ---- Threads ---- */
+static int g_usock = -1; /* UDP socket */
+static pcap_t* g_ph = NULL;
+static uint16_t g_seq = 0;
+static int g_mcs_idx = 0, g_gi_short = 1, g_bw40 = 0, g_ldpc = 1, g_stbc = 1;
+static uint8_t g_group_id = 0, g_tx_id = 0, g_link_id = 0, g_radio_port = 0;
+/* Pending epoch adjustment (apply at boundary if set during active slot) */
+static uint64_t g_pending_epoch_us = 0;
+static int g_pending_epoch_valid = 0;
+
+static void* thr_udp_rx(void* arg)
+{
+  (void)arg;
+  uint8_t buf[MAX_UDP_PAYLOAD];
+  while (g_run) {
+    ssize_t n = recv(g_usock, buf, sizeof(buf), 0);
+    if (n < 0) { if (errno==EINTR) continue; if (errno==EAGAIN||errno==EWOULDBLOCK){ usleep(1000); continue; } perror("recv"); break; }
+    if (n == 0) continue;
+    ring_push(buf, (size_t)n);
+  }
+  return NULL;
+}
+
+static void* thr_ctrl(void* arg)
+{
+  (void)arg;
+  uint8_t buf[256];
+  while (g_run) {
+    ssize_t n = recv(g_cs, buf, sizeof(buf), 0);
+    if (n < 0) { if (errno==EINTR) continue; if (errno==EAGAIN||errno==EWOULDBLOCK){ usleep(1000); continue; } perror("ctrl recv"); break; }
+    if ((size_t)n >= sizeof(struct wfbx_ctrl_hdr)) {
+      const struct wfbx_ctrl_hdr* h = (const struct wfbx_ctrl_hdr*)buf;
+      if (h->magic == WFBX_CTRL_MAGIC && h->ver == WFBX_CTRL_VER && h->type == WFBX_CTRL_EPOCH && (size_t)n >= sizeof(struct wfbx_ctrl_epoch)) {
+        const struct wfbx_ctrl_epoch* m = (const struct wfbx_ctrl_epoch*)buf;
+        /* Defer correction if inside our active TX slot */
+        uint64_t now = mono_us_raw();
+        int defer = 0;
+        pthread_mutex_lock(&g_epoch.mtx);
+        uint64_t T_open  = g_epoch.cur_us + (uint64_t)g_slot_start_us;
+        uint64_t T_close = T_open + (uint64_t)g_slot_len_us - (uint64_t)g_gi_tx_us;
+        if (now >= T_open && now < T_close) defer = 1;
+        pthread_mutex_unlock(&g_epoch.mtx);
+        if (defer) {
+          /* Keep only the latest pending epoch */
+          pthread_mutex_lock(&g_epoch.mtx);
+          g_pending_epoch_us = m->epoch_us;
+          g_pending_epoch_valid = 1;
+          pthread_mutex_unlock(&g_epoch.mtx);
+        } else {
+          epoch_adjust_from_mx(m->epoch_us);
+        }
+      }
+    }
+  }
+  return NULL;
+}
+
+static void* thr_sched(void* arg)
+{
+  (void)arg;
+  while (g_run) {
+    uint64_t now = mono_us_raw();
+    int advanced = epoch_switch_if_needed(now);
+    if (advanced) {
+      /* Apply pending epoch correction (if any) exactly at boundary */
+      uint64_t pending = 0; int have = 0;
+      pthread_mutex_lock(&g_epoch.mtx);
+      if (g_pending_epoch_valid) { pending = g_pending_epoch_us; have = 1; g_pending_epoch_valid = 0; }
+      pthread_mutex_unlock(&g_epoch.mtx);
+      if (have) {
+        epoch_adjust_from_mx(pending);
+      }
+    }
+
+    pthread_mutex_lock(&g_epoch.mtx);
+    uint64_t T_open  = g_epoch.cur_us + (uint64_t)g_slot_start_us;
+    uint64_t T_close = T_open + (uint64_t)g_slot_len_us - (uint64_t)g_gi_tx_us;
+    uint64_t T_next  = g_epoch.next_us;
+    pthread_mutex_unlock(&g_epoch.mtx);
+
+    now = mono_us_raw();
+    if (now < T_open) {
+      uint64_t dt = T_open - now; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL); continue;
+    }
+    if (now > T_close) {
+      uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL); continue;
+    }
+
+    pkt_t p; if (!ring_pop(&p)) continue;
+
+    uint32_t A_us = airtime_us_tx(p.len + (size_t)WFBX_TRAILER_BYTES, g_mcs_idx, g_gi_short, g_bw40, g_stbc);
+    now = mono_us_raw();
+    if (now + g_delta_us + A_us + g_tau_max_us + g_eps_us > T_close) {
+      /* cannot fit; drop to keep scheduler simple */
+      continue;
+    }
+
+    int ret = send_packet(g_ph, p.data, p.len, g_seq,
+                          (uint8_t)g_mcs_idx, g_gi_short, g_bw40, g_ldpc, g_stbc,
+                          g_group_id, g_tx_id, g_link_id, g_radio_port);
+    if (ret >= 0) g_seq = (uint16_t)((g_seq + 1) & 0x0fff);
+  }
+  return NULL;
+}
+
 /* Send one packet (payload) via pcap_inject with given TX params */
 static int send_packet(pcap_t* ph,
                        const uint8_t* payload, size_t payload_len, uint16_t seq_num,
@@ -182,6 +486,7 @@ int main(int argc, char** argv) {
   int ldpc = 1;
   int stbc = 1;
   int group_id = 0, tx_id = 0, link_id = 0, radio_port = 0;
+  const char* mx_addr_cli = "@wfbx.mx";
 
   static struct option longopts[] = {
     {"ip",         required_argument, 0, 0},
@@ -195,6 +500,15 @@ int main(int argc, char** argv) {
     {"tx_id",      required_argument, 0, 0},
     {"link_id",    required_argument, 0, 0},
     {"radio_port", required_argument, 0, 0},
+    {"mx",         required_argument, 0, 0}, /* MX UDS abstract address */
+    {"epoch_len",  required_argument, 0, 0},
+    {"epoch_gi",   required_argument, 0, 0},
+    {"slot_start", required_argument, 0, 0},
+    {"slot_len",   required_argument, 0, 0},
+    {"gi_tx",      required_argument, 0, 0},
+    {"delta_us",   required_argument, 0, 0},
+    {"d_max",      required_argument, 0, 0},
+    {"eps_us",     required_argument, 0, 0},
     {0,0,0,0}
   };
 
@@ -224,6 +538,15 @@ int main(int argc, char** argv) {
       else if (strcmp(name,"tx_id")==0)    tx_id    = atoi(val);
       else if (strcmp(name,"link_id")==0)  link_id  = atoi(val);
       else if (strcmp(name,"radio_port")==0) radio_port = atoi(val);
+      else if (strcmp(name,"mx")==0)       mx_addr_cli = val;
+      else if (strcmp(name,"epoch_len")==0)  g_epoch_len_us = (uint32_t)atoi(val);
+      else if (strcmp(name,"epoch_gi")==0)   g_epoch_gi_us  = (uint32_t)atoi(val);
+      else if (strcmp(name,"slot_start")==0)  g_slot_start_us= (uint32_t)atoi(val);
+      else if (strcmp(name,"slot_len")==0)    g_slot_len_us  = (uint32_t)atoi(val);
+      else if (strcmp(name,"gi_tx")==0)       g_gi_tx_us     = (uint32_t)atoi(val);
+      else if (strcmp(name,"delta_us")==0)    g_delta_us     = (uint32_t)atoi(val);
+      else if (strcmp(name,"d_max")==0)       g_d_max_km     = atof(val);
+      else if (strcmp(name,"eps_us")==0)      g_eps_us       = (uint32_t)atoi(val);
     }
   }
 
@@ -256,32 +579,48 @@ int main(int argc, char** argv) {
   }
 
   signal(SIGINT, on_sigint);
-  /* Define local T_epoch as process start time */
+  /* Define local T_epoch as process start time; may be overridden by MX */
   g_epoch_start_us = mono_us_raw();
-
-  fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d\n",
-          ip, port, iface, mcs_idx, gi_short?"short":"long", bw40?"40":"20",
-          ldpc, stbc, group_id, tx_id, link_id, radio_port);
-
-  uint8_t buf[MAX_UDP_PAYLOAD];
-  uint16_t seq = 0;
-
-  while (g_run) {
-    ssize_t n = recv(us, buf, sizeof(buf), 0);
-    if (n < 0) { if (errno==EINTR) continue; perror("recv"); break; }
-    if (n == 0) continue;
-
-    int ret = send_packet(ph, buf, (size_t)n, seq,
-                          (uint8_t)mcs_idx, gi_short, bw40, ldpc, stbc,
-                          (uint8_t)group_id, (uint8_t)tx_id, (uint8_t)link_id, (uint8_t)radio_port);
-    if (ret < 0) {
-      fprintf(stderr, "send_packet failed\n");
-      break;
-    }
-    seq = (uint16_t)((seq + 1) & 0x0fff);
+  (void)ctrl_init(mx_addr_cli, (uint8_t)tx_id);
+  /* Derive tau_max_us from d_max (km): c≈299792.458 km/s ⇒ 3.335641 µs/km */
+  if (g_d_max_km > 0.0) {
+    double tau = g_d_max_km * 3.335641; /* us */
+    if (tau < 0.0) tau = 0.0;
+    if (tau > (double)UINT32_MAX) tau = (double)UINT32_MAX;
+    g_tau_max_us = (uint32_t)(tau + 0.5);
   }
+  /* Apply propagation guard to epoch_gi and gi_tx */
+  g_epoch_gi_us += g_tau_max_us;
+  g_gi_tx_us    += g_tau_max_us;
+  /* initialize epoch triple with adjusted guards */
+  pthread_mutex_lock(&g_epoch.mtx);
+  g_epoch.len_us = g_epoch_len_us; g_epoch.gi_us = g_epoch_gi_us;
+  pthread_mutex_unlock(&g_epoch.mtx);
+  epoch_init_from_start(g_epoch_start_us);
 
-  if (ph) pcap_close(ph);
-  close(us);
+  fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d | mx=%s\n",
+          ip, port, iface, mcs_idx, gi_short?"short":"long", bw40?"40":"20",
+          ldpc, stbc, group_id, tx_id, link_id, radio_port, mx_addr_cli);
+
+  /* Make UDP socket non-blocking */
+  int nfl = fcntl(us, F_GETFL, 0); if (nfl >= 0) fcntl(us, F_SETFL, nfl | O_NONBLOCK);
+
+  /* Publish globals for threads */
+  g_usock = us; g_ph = ph; g_seq = 0;
+  g_mcs_idx = mcs_idx; g_gi_short = gi_short; g_bw40 = bw40; g_ldpc = ldpc; g_stbc = stbc;
+  g_group_id = (uint8_t)group_id; g_tx_id = (uint8_t)tx_id; g_link_id = (uint8_t)link_id; g_radio_port = (uint8_t)radio_port;
+
+  pthread_t th_rx, th_ctrl, th_sched;
+  pthread_create(&th_rx, NULL, thr_udp_rx, NULL);
+  pthread_create(&th_ctrl, NULL, thr_ctrl, NULL);
+  pthread_create(&th_sched, NULL, thr_sched, NULL);
+
+  /* Join until SIGINT */
+  pthread_join(th_rx, NULL);
+  pthread_join(th_ctrl, NULL);
+  pthread_join(th_sched, NULL);
+
+  if (g_ph) pcap_close(g_ph);
+  close(g_usock);
   return 0;
 }

@@ -208,3 +208,34 @@ struct wfbx_mesh_trailer {
 /* Legacy trailer sizes we may still encounter */
 #define WFBX_TRAILER12_BYTES 12u /* ts_tx(4) + t0_ns(8) */
 #define WFBX_TRAILER8_BYTES   8u /* t0_ns only */
+
+/* ---- Control channel (UNIX DGRAM, abstract namespace) ------------------ */
+#define WFBX_CTRL_MAGIC 0x57584258u /* 'WXBX' */
+enum { WFBX_CTRL_VER = 1 };
+enum { WFBX_CTRL_SUB = 1, WFBX_CTRL_UNSUB = 2, WFBX_CTRL_EPOCH = 3 };
+
+#pragma pack(push,1)
+struct wfbx_ctrl_hdr {
+  uint32_t magic;   /* WFBX_CTRL_MAGIC */
+  uint8_t  ver;     /* WFBX_CTRL_VER */
+  uint8_t  type;    /* WFBX_CTRL_* */
+  uint16_t rsvd;
+  uint32_t seq;     /* monotonic sequence per sender */
+};
+
+/* SUB/UNSUB: TX -> MX. name is abstract UDS name (without leading NUL), UTF-8. */
+struct wfbx_ctrl_sub {
+  struct wfbx_ctrl_hdr h;
+  uint8_t  tx_id;   /* who */
+  char     name[96];/* e.g. "@wfbx.tx.0.12345" or "wfbx.tx.0.12345" */
+};
+
+/* EPOCH: MX -> TX. All times in microseconds unless noted. */
+struct wfbx_ctrl_epoch {
+  struct wfbx_ctrl_hdr h;
+  uint64_t epoch_us;      /* start of current superframe per MX */
+  uint32_t epoch_len_us;  /* superframe length */
+  uint32_t epoch_gi_us;   /* inter-superframe guard */
+  uint64_t issued_us;     /* when MX sent this update */
+};
+#pragma pack(pop)

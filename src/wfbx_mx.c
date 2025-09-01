@@ -267,6 +267,11 @@ struct cli_cfg {
   double alpha;    /* EMA coefficient */
   int    tau_us;   /* propagation (us) */
   int    delta_us; /* stack latency (us) */
+  /* Control channel */
+  const char* ctrl_addr;    /* abstract UDS address (e.g. @wfbx.mx) */
+  uint32_t epoch_len_us;    /* publish superframe length */
+  uint32_t epoch_gi_us;     /* publish inter-superframe guard */
+  double  d_max_km;         /* max distance (km) ⇒ tau_us */
 };
 
 static void print_help(const char* prog)
@@ -276,8 +281,9 @@ static void print_help(const char* prog)
          "  --ip <addr>         UDP destination IP (default: %s)\n"
          "  --port <num>        UDP destination port (default: %d)\n"
          "  --alpha <0..1>      EMA coefficient for T_epoch (default: 0.3)\n"
-         "  --tau_us <num>      Propagation delay in us (default: 0)\n"
          "  --delta_us <num>    Stack latency in us (default: 1500)\n"
+         "  --ctrl <@name>      Control UDS abstract address (default: @wfbx.mx)\n"
+         "  --d_max <km>        Max distance in km (sets tau_us = round(d_max*3.335641))\n"
          "  --stat_period <ms>  Stats period in milliseconds (default: %d)\n"
          "  --help              Show this help and exit\n",
          prog, g_dest_ip_default, g_dest_port_default, 1000);
@@ -286,13 +292,14 @@ static void print_help(const char* prog)
 static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
 {
   cfg->ip = g_dest_ip_default; cfg->port = g_dest_port_default; cfg->n_if = 0; cfg->stat_period_ms = 1000; cfg->txf.mode = TXF_ANY;
-  cfg->alpha = 0.3; cfg->tau_us = 0; cfg->delta_us = 1500;
+  cfg->alpha = 0.3; cfg->tau_us = 0; cfg->delta_us = 1500; cfg->ctrl_addr = "@wfbx.mx"; cfg->epoch_len_us = 0; cfg->epoch_gi_us = 0; cfg->d_max_km = 0.0;
   static struct option longopts[] = {
     {"ip",           required_argument, 0, 0},
     {"port",         required_argument, 0, 0},
     {"alpha",        required_argument, 0, 0},
-    {"tau_us",       required_argument, 0, 0},
     {"delta_us",     required_argument, 0, 0},
+    {"ctrl",         required_argument, 0, 0},
+    {"d_max",        required_argument, 0, 0},
     {"stat_period",  required_argument, 0, 0},
     {"help",         no_argument,       0, 0},
     {0,0,0,0}
@@ -303,11 +310,19 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
       if      (strcmp(name,"ip")==0)          cfg->ip = val;
       else if (strcmp(name,"port")==0)        cfg->port = atoi(val);
       else if (strcmp(name,"alpha")==0)       cfg->alpha = atof(val);
-      else if (strcmp(name,"tau_us")==0)      cfg->tau_us = atoi(val);
       else if (strcmp(name,"delta_us")==0)    cfg->delta_us = atoi(val);
+      else if (strcmp(name,"ctrl")==0)        cfg->ctrl_addr = val;
+      else if (strcmp(name,"d_max")==0)       cfg->d_max_km = atof(val);
       else if (strcmp(name,"stat_period")==0) cfg->stat_period_ms = atoi(val);
       else if (strcmp(name,"help")==0) { print_help(argv[0]); exit(0); }
     }
+  }
+  /* If d_max provided, derive tau_us = round(d_max_km * 3.335641 us/km) */
+  if (cfg->d_max_km > 0.0) {
+    double tau = cfg->d_max_km * 3.335641;
+    if (tau < 0.0) tau = 0.0;
+    if (tau > (double)INT_MAX) tau = (double)INT_MAX;
+    cfg->tau_us = (int)(tau + 0.5);
   }
   if (optind >= argc) { fprintf(stderr, "Error: missing <wlan_iface>. Use --help for usage.\n"); return -1; }
   for (int i=optind; i<argc && cfg->n_if < MAX_IFS; ++i) cfg->ifname[cfg->n_if++] = argv[i];
@@ -336,8 +351,9 @@ int main(int argc, char** argv)
   if (n_open == 0) { fprintf(stderr, "No usable interfaces opened.\n"); return 1; }
 
   fprintf(stderr, "MX RX on: "); for (int i=0;i<n_open;i++) fprintf(stderr, "%s%s", cli.ifname[i], (i+1<n_open?", ":""));
-  fprintf(stderr, " | UDP forward %s:%d | stat %d ms | tx_id=ANY | alpha=%.3f delta_us=%d tau_us=%d\n",
-          cli.ip, cli.port, cli.stat_period_ms, cli.alpha, cli.delta_us, cli.tau_us);
+  fprintf(stderr, " | UDP %s:%d | stat %d ms | alpha=%.2f delta_us=%d tau_us=%d | ctrl=%s\n",
+          cli.ip, cli.port, cli.stat_period_ms, cli.alpha, cli.delta_us, cli.tau_us,
+          cli.ctrl_addr);
 
   uint64_t t0 = now_ms();
   uint64_t pkts = 0;
@@ -369,12 +385,48 @@ int main(int argc, char** argv)
   int64_t e_epoch_hat_max = INT64_C(0);
   uint64_t e_epoch_hat_samples = 0;
 
+  /* Control socket setup (abstract UDS) */
+  int cs = -1; struct sockaddr_un mx_sa; socklen_t mx_sl = 0;
+  if (cli.ctrl_addr && *cli.ctrl_addr) {
+    memset(&mx_sa, 0, sizeof(mx_sa)); mx_sa.sun_family = AF_UNIX; mx_sa.sun_path[0] = '\0';
+    const char* nm = cli.ctrl_addr; if (nm[0] == '@') nm++;
+    strncpy(mx_sa.sun_path+1, nm, sizeof(mx_sa.sun_path)-2);
+    mx_sl = (socklen_t)offsetof(struct sockaddr_un, sun_path) + 1 + (socklen_t)strlen(nm);
+    cs = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (cs >= 0) {
+      if (bind(cs, (struct sockaddr*)&mx_sa, mx_sl) != 0) { perror("ctrl bind"); close(cs); cs = -1; }
+      else { int fl = fcntl(cs, F_GETFL, 0); if (fl>=0) fcntl(cs, F_SETFL, fl|O_NONBLOCK); }
+    }
+  }
+  struct { struct sockaddr_un sa; socklen_t sl; char name[108]; int active; } subs[64];
+  for (int i=0;i<64;i++){ memset(&subs[i],0,sizeof(subs[i])); subs[i].sa.sun_family=AF_UNIX; }
+  uint32_t epoch_seq = 0;
+
   while (g_run) {
     fd_set rfds; FD_ZERO(&rfds); int maxfd=-1; for (int i=0;i<n_open;i++){ FD_SET(fds[i], &rfds); if (fds[i]>maxfd) maxfd=fds[i]; }
+    if (cs >= 0) { FD_SET(cs, &rfds); if (cs > maxfd) maxfd = cs; }
     struct timeval tv; uint64_t now = now_ms(); uint64_t ms_left = (t0 + (uint64_t)cli.stat_period_ms > now) ? (t0 + (uint64_t)cli.stat_period_ms - now) : 0;
     tv.tv_sec = (time_t)(ms_left/1000ull); tv.tv_usec = (suseconds_t)((ms_left%1000ull)*1000ull);
     int sel = select(maxfd+1, &rfds, NULL, NULL, &tv);
     if (sel < 0) { if (errno == EINTR) goto stats_tick; perror("select"); break; }
+
+    /* Control drain (SUB) */
+    if (cs >= 0 && sel > 0 && FD_ISSET(cs, &rfds)) {
+      uint8_t bufc[256]; struct sockaddr_un from; socklen_t fl = sizeof(from);
+      ssize_t n = recvfrom(cs, bufc, sizeof(bufc), 0, (struct sockaddr*)&from, &fl);
+      if (n >= (ssize_t)sizeof(struct wfbx_ctrl_hdr)) {
+        const struct wfbx_ctrl_hdr* h = (const struct wfbx_ctrl_hdr*)bufc;
+        if (h->magic == WFBX_CTRL_MAGIC && h->ver == WFBX_CTRL_VER && h->type == WFBX_CTRL_SUB && (size_t)n >= sizeof(struct wfbx_ctrl_sub)) {
+          const struct wfbx_ctrl_sub* s = (const struct wfbx_ctrl_sub*)bufc;
+          struct sockaddr_un sa; socklen_t sl; memset(&sa,0,sizeof(sa)); sa.sun_family=AF_UNIX; sa.sun_path[0]='\0';
+          const char* nm2 = s->name; if (nm2 && nm2[0]=='@') nm2++;
+          strncpy(sa.sun_path+1, nm2?nm2:"", sizeof(sa.sun_path)-2);
+          sl = (socklen_t)offsetof(struct sockaddr_un, sun_path) + 1 + (socklen_t)strlen(nm2?nm2:"");
+          int placed = 0; for (int k=0;k<64;k++) if (subs[k].active && strcmp(subs[k].name, nm2?nm2:"")==0) { subs[k].sa=sa; subs[k].sl=sl; placed=1; break; }
+          if (!placed) for (int k=0;k<64;k++) if (!subs[k].active) { subs[k].active=1; subs[k].sa=sa; subs[k].sl=sl; strncpy(subs[k].name, nm2?nm2:"", sizeof(subs[k].name)-1); subs[k].name[sizeof(subs[k].name)-1]=0; break; }
+        }
+      }
+    }
 
     for (int i=0;i<n_open;i++) {
       if (fds[i] < 0) continue;
@@ -510,6 +562,14 @@ stats_tick:
         e_delta_sum = 0; e_delta_samples = 0;
         e_epoch_inst_sum = 0; e_epoch_inst_samples = 0;
         e_epoch_hat_sum = 0;  e_epoch_hat_samples = 0;
+
+        /* Publish EPOCH to subscribers (smoothed); send only T_epoch for now */
+        if (cs >= 0 && have_epoch) {
+          struct wfbx_ctrl_epoch m; memset(&m, 0, sizeof(m));
+          m.h.magic = WFBX_CTRL_MAGIC; m.h.ver = WFBX_CTRL_VER; m.h.type = WFBX_CTRL_EPOCH; m.h.seq = ++epoch_seq;
+          m.epoch_us = epoch_hat_us; m.epoch_len_us = 0; m.epoch_gi_us = 0; m.issued_us = mono_us_raw();
+          for (int k=0;k<64;k++) if (subs[k].active) (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl);
+        }
       }
     }
   }
