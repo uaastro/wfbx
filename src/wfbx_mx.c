@@ -430,7 +430,13 @@ int main(int argc, char** argv)
           if (plen > 0) memcpy(sa.sun_path+1, nm2, plen);
           sl = (socklen_t)offsetof(struct sockaddr_un, sun_path) + 1 + (socklen_t)plen;
           int placed = 0; for (int k=0;k<64;k++) if (subs[k].active && strcmp(subs[k].name, nm2?nm2:"")==0) { subs[k].sa=sa; subs[k].sl=sl; placed=1; break; }
-          if (!placed) for (int k=0;k<64;k++) if (!subs[k].active) { subs[k].active=1; subs[k].sa=sa; subs[k].sl=sl; snprintf(subs[k].name, sizeof(subs[k].name), "%s", nm2?nm2:""); break; }
+          if (!placed) for (int k=0;k<64;k++) if (!subs[k].active) {
+            subs[k].active=1; subs[k].sa=sa; subs[k].sl=sl;
+            /* Cap copied name to buffer size to avoid truncation warnings */
+            snprintf(subs[k].name, sizeof(subs[k].name), "%.*s",
+                     (int)(sizeof(subs[k].name)-1), nm2?nm2:"");
+            break;
+          }
         }
       }
     }
