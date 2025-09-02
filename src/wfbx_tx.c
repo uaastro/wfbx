@@ -398,6 +398,12 @@ static uint64_t g_sent_in_window = 0;
 static uint64_t g_drop_in_window = 0;
 static uint64_t g_tx_t0_ms = 0;
 static uint64_t g_sent_period = 0;
+static uint64_t g_drop_period = 0;
+static uint64_t g_slot_sent_sum = 0;
+static uint64_t g_slot_sent_min = UINT64_MAX;
+static uint64_t g_slot_sent_max = 0;
+static uint64_t g_slot_count    = 0;
+static pthread_mutex_t g_stat_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 static void* thr_udp_rx(void* arg)
 {
@@ -458,16 +464,39 @@ static void* thr_sched(void* arg)
     uint64_t now_ms_tick = now / 1000ull;
     if (g_tx_t0_ms == 0) g_tx_t0_ms = now_ms_tick;
     if (now_ms_tick - g_tx_t0_ms >= (uint64_t)g_stat_period_ms) {
-      fprintf(stderr, "[TX OUT] dt=%d ms | pkts=%llu\n", g_stat_period_ms, (unsigned long long)g_sent_period);
-      g_tx_t0_ms = now_ms_tick;
+      /* Summary once per period */
+      uint64_t udp_rx = 0;
+      pthread_mutex_lock(&g_stat_mtx);
+      udp_rx = g_rx_count_period;
+      g_rx_count_period = 0;
+      pthread_mutex_unlock(&g_stat_mtx);
+      uint64_t slot_avg = (g_slot_count > 0) ? (g_slot_sent_sum / g_slot_count) : 0;
+      uint64_t slot_min = (g_slot_count > 0) ? g_slot_sent_min : 0;
+      uint64_t slot_max = (g_slot_count > 0) ? g_slot_sent_max : 0;
+      fprintf(stderr, "[TX STAT] dt=%d ms | udp_rx=%llu | sent=%llu | drop=%llu | slot_sent avg=%llu min=%llu max=%llu\n",
+              g_stat_period_ms,
+              (unsigned long long)udp_rx,
+              (unsigned long long)g_sent_period,
+              (unsigned long long)g_drop_period,
+              (unsigned long long)slot_avg,
+              (unsigned long long)slot_min,
+              (unsigned long long)slot_max);
+      /* reset period counters */
+      g_tx_t0_ms    = now_ms_tick;
       g_sent_period = 0;
+      g_drop_period = 0;
+      g_slot_sent_sum = 0;
+      g_slot_sent_min = UINT64_MAX;
+      g_slot_sent_max = 0;
+      g_slot_count    = 0;
     }
     int advanced = epoch_switch_if_needed(now);
     if (advanced) {
-      /* window boundary: report and reset per-window stats */
-      fprintf(stderr, "[SCHED] window sent=%llu drop=%llu\n",
-              (unsigned long long)g_sent_in_window,
-              (unsigned long long)g_drop_in_window);
+      /* window boundary: fold per-window sent into period slot stats and reset window counters */
+      g_slot_sent_sum += g_sent_in_window;
+      if (g_slot_sent_min == UINT64_MAX || g_sent_in_window < g_slot_sent_min) g_slot_sent_min = g_sent_in_window;
+      if (g_sent_in_window > g_slot_sent_max) g_slot_sent_max = g_sent_in_window;
+      g_slot_count++;
       g_sent_in_window = 0;
       g_drop_in_window = 0;
       /* Apply pending epoch correction (if any) exactly at boundary */
@@ -527,6 +556,7 @@ static void* thr_sched(void* arg)
       /* Put the packet back to the front so it goes first in the next window */
       ring_push_front(&p);
       g_drop_in_window++;
+      g_drop_period++;
       /* Sleep until next superframe to avoid busy loop */
       uint64_t dt = (T_next > now) ? (T_next - now) : 1000;
       struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)};
