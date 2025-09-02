@@ -393,7 +393,6 @@ static int g_pending_epoch_valid = 0;
 
 /* Stats */
 static int g_stat_period_ms = 1000;
-static uint64_t g_rx_t0_ms = 0;
 static uint64_t g_rx_count_period = 0;
 static uint64_t g_sent_in_window = 0;
 static uint64_t g_drop_in_window = 0;
@@ -410,9 +409,7 @@ static void* thr_udp_rx(void* arg)
     if (n == 0) continue;
     ring_push(buf, (size_t)n);
     /* Count only successfully received UDP datagrams */
-    pthread_mutex_lock(&g_stat_mtx);
     g_rx_count_period++;
-    pthread_mutex_unlock(&g_stat_mtx);
   }
   return NULL;
 }
