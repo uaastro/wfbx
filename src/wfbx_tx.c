@@ -5,6 +5,7 @@
 #include <pcap/pcap.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
@@ -396,6 +397,8 @@ static uint64_t g_rx_t0_ms = 0;
 static uint64_t g_rx_count_period = 0;
 static uint64_t g_sent_in_window = 0;
 static uint64_t g_drop_in_window = 0;
+static uint64_t g_tx_t0_ms = 0;
+static uint64_t g_sent_period = 0;
 
 static void* thr_udp_rx(void* arg)
 {
@@ -527,7 +530,7 @@ static void* thr_sched(void* arg)
     int64_t delta_to_close = (int64_t)T_close - (int64_t)now;
     uint64_t delta_slot_us = (uint64_t)(T_close - T_open);
     fprintf(stderr, "[TX SEND] now_us=%" PRIu64 " delta_to_close_us=%" PRId64 " delta_slot_us=%" PRIu64 "\n",
-            (unsigned long long)now, (long long)delta_to_close, (unsigned long long)delta_slot_us);
+            (uint64_t)now, (int64_t)delta_to_close, (uint64_t)delta_slot_us);
 
     int ret = send_packet(g_ph, p.data, p.len, g_seq,
                           (uint8_t)g_mcs_idx, g_gi_short, g_bw40, g_ldpc, g_stbc,
