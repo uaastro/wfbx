@@ -410,17 +410,9 @@ static void* thr_udp_rx(void* arg)
     if (n == 0) continue;
     ring_push(buf, (size_t)n);
     /* Count only successfully received UDP datagrams */
+    pthread_mutex_lock(&g_stat_mtx);
     g_rx_count_period++;
-    /* RX stats per period */
-    uint64_t now_ms_local = (uint64_t)(mono_us_raw() / 1000ull);
-    if (g_rx_t0_ms == 0) {
-      g_rx_t0_ms = now_ms_local;
-    }
-    if (now_ms_local - g_rx_t0_ms >= (uint64_t)g_stat_period_ms) {
-      fprintf(stderr, "[UDP RX] dt=%d ms | pkts=%llu\n", g_stat_period_ms, (unsigned long long)g_rx_count_period);
-      g_rx_t0_ms = now_ms_local;
-      g_rx_count_period = 0;
-    }
+    pthread_mutex_unlock(&g_stat_mtx);
   }
   return NULL;
 }
