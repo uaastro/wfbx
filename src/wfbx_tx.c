@@ -461,6 +461,14 @@ static void* thr_sched(void* arg)
   (void)arg;
   while (g_run) {
     uint64_t now = mono_us_raw();
+    /* Per-second TX stats tick (independent of sends) */
+    uint64_t now_ms_tick = now / 1000ull;
+    if (g_tx_t0_ms == 0) g_tx_t0_ms = now_ms_tick;
+    if (now_ms_tick - g_tx_t0_ms >= (uint64_t)g_stat_period_ms) {
+      fprintf(stderr, "[TX OUT] dt=%d ms | pkts=%llu\n", g_stat_period_ms, (unsigned long long)g_sent_period);
+      g_tx_t0_ms = now_ms_tick;
+      g_sent_period = 0;
+    }
     int advanced = epoch_switch_if_needed(now);
     if (advanced) {
       /* window boundary: report and reset per-window stats */
@@ -515,10 +523,20 @@ static void* thr_sched(void* arg)
       continue;
     }
 
+    /* Diagnostics for this send */
+    int64_t delta_to_close = (int64_t)T_close - (int64_t)now;
+    uint64_t delta_slot_us = (uint64_t)(T_close - T_open);
+    fprintf(stderr, "[TX SEND] now_us=%" PRIu64 " delta_to_close_us=%" PRId64 " delta_slot_us=%" PRIu64 "\n",
+            (unsigned long long)now, (long long)delta_to_close, (unsigned long long)delta_slot_us);
+
     int ret = send_packet(g_ph, p.data, p.len, g_seq,
                           (uint8_t)g_mcs_idx, g_gi_short, g_bw40, g_ldpc, g_stbc,
                           g_group_id, g_tx_id, g_link_id, g_radio_port);
-    if (ret >= 0) { g_seq = (uint16_t)((g_seq + 1) & 0x0fff); g_sent_in_window++; }
+    if (ret >= 0) {
+      g_seq = (uint16_t)((g_seq + 1) & 0x0fff);
+      g_sent_in_window++;
+      g_sent_period++;
+    }
   }
   return NULL;
 }
