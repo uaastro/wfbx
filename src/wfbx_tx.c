@@ -495,6 +495,13 @@ static void* thr_sched(void* arg)
 
     pkt_t p; if (!ring_pop(&p)) continue;
 
+    /* Recompute slot window after potential wait in ring_pop to avoid using stale boundaries */
+    pthread_mutex_lock(&g_epoch.mtx);
+    T_open  = g_epoch.cur_us + (uint64_t)g_slot_start_us;
+    T_close = T_open + (uint64_t)g_slot_len_us - (uint64_t)g_gi_tx_us;
+    T_next  = g_epoch.next_us;
+    pthread_mutex_unlock(&g_epoch.mtx);
+
     uint32_t A_us = airtime_us_tx(p.len + (size_t)WFBX_TRAILER_BYTES, g_mcs_idx, g_gi_short, g_bw40, g_stbc);
     now = mono_us_raw();
     if (now + g_delta_us + A_us + g_tau_max_us + g_eps_us > T_close) {
