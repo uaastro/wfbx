@@ -549,8 +549,8 @@ static void* thr_sched(void* arg)
     /* Diagnostics for this send */
     int64_t delta_to_close = (int64_t)T_close - (int64_t)now;
     uint64_t delta_slot_us = (uint64_t)(T_close - T_open);
-    fprintf(stderr, "[TX SEND] now_us=%" PRIu64 " delta_to_close_us=%" PRId64 " delta_slot_us=%" PRIu64 "\n",
-            (uint64_t)now, (int64_t)delta_to_close, (uint64_t)delta_slot_us);
+    fprintf(stderr, "[TX SEND] airtime_us=%u delta_to_close_us=%" PRId64 " delta_slot_us=%" PRIu64 "\n",
+            (unsigned)A_us, (int64_t)delta_to_close, (uint64_t)delta_slot_us);
 
     int ret = send_packet(g_ph, p.data, p.len, g_seq,
                           (uint8_t)g_mcs_idx, g_gi_short, g_bw40, g_ldpc, g_stbc,
