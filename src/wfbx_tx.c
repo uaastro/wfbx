@@ -500,10 +500,17 @@ static void* thr_sched(void* arg)
     pthread_mutex_unlock(&g_epoch.mtx);
 
     now = mono_us_raw();
+    static uint64_t t_next_send = 0;
     if (now < T_open) {
-      uint64_t dt = T_open - now; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL); continue;
+      uint64_t dt = T_open - now; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL);
+      t_next_send = T_open;
+      continue;
     }
-    if (now > T_close) { uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL); continue; }
+    if (now > T_close) {
+      uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL);
+      t_next_send = 0;
+      continue;
+    }
 
     pkt_t p; if (!ring_pop(&p)) continue;
 
@@ -516,6 +523,17 @@ static void* thr_sched(void* arg)
 
     uint32_t A_us = airtime_us_tx(p.len + (size_t)WFBX_TRAILER_BYTES, g_mcs_idx, g_gi_short, g_bw40, g_stbc);
     now = mono_us_raw();
+    if (t_next_send == 0) t_next_send = (now > T_open) ? now : T_open;
+    if (now < t_next_send) {
+      uint64_t dtp = t_next_send - now; struct timespec ts={ dtp/1000000ull, (long)((dtp%1000000ull)*1000ull)}; nanosleep(&ts, NULL);
+      now = mono_us_raw();
+    }
+    if (now > T_close) {
+      ring_push_front(&p);
+      uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL);
+      t_next_send = 0;
+      continue;
+    }
     if (now + g_delta_us + A_us + g_tau_max_us + g_eps_us > T_close) {
       /* Put the packet back to the front so it goes first in the next window */
       ring_push_front(&p);
@@ -524,6 +542,7 @@ static void* thr_sched(void* arg)
       uint64_t dt = (T_next > now) ? (T_next - now) : 1000;
       struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)};
       nanosleep(&ts, NULL);
+      t_next_send = 0;
       continue;
     }
 
@@ -540,6 +559,7 @@ static void* thr_sched(void* arg)
       g_seq = (uint16_t)((g_seq + 1) & 0x0fff);
       g_sent_in_window++;
       g_sent_period++;
+      t_next_send = now + (uint64_t)g_delta_us + (uint64_t)A_us + (uint64_t)g_tau_max_us;
     }
   }
   return NULL;
