@@ -406,10 +406,11 @@ static void* thr_udp_rx(void* arg)
   uint8_t buf[MAX_UDP_PAYLOAD];
   while (g_run) {
     ssize_t n = recv(g_usock, buf, sizeof(buf), 0);
-    g_rx_count_period++;
     if (n < 0) { if (errno==EINTR) continue; if (errno==EAGAIN||errno==EWOULDBLOCK){ usleep(1000); continue; } perror("recv"); break; }
     if (n == 0) continue;
     ring_push(buf, (size_t)n);
+    /* Count only successfully received UDP datagrams */
+    g_rx_count_period++;
     /* RX stats per period */
     uint64_t now_ms_local = (uint64_t)(mono_us_raw() / 1000ull);
     if (g_rx_t0_ms == 0) {
