@@ -66,7 +66,7 @@ struct rt_tx_hdr {
 #pragma pack(pop)
 
 /* ---- helpers ---- */
-static volatile int g_run = 1;
+static volatile sig_atomic_t g_run = 1;
 static void on_sigint(int){ g_run = 0; }
 
 static void mac_set(uint8_t m[6], uint8_t a0,uint8_t a1,uint8_t a2,uint8_t a3,uint8_t a4,uint8_t a5){
@@ -236,7 +236,11 @@ static pthread_cond_t g_rcond_nonfull  = PTHREAD_COND_INITIALIZER;
 static void ring_push(const uint8_t* data, size_t len)
 {
   pthread_mutex_lock(&g_rmtx);
-  while (g_rcount == RING_SIZE && g_run) pthread_cond_wait(&g_rcond_nonfull, &g_rmtx);
+  while (g_rcount == RING_SIZE && g_run) {
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 50 * 1000 * 1000; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+    (void)pthread_cond_timedwait(&g_rcond_nonfull, &g_rmtx, &ts);
+  }
   if (!g_run) { pthread_mutex_unlock(&g_rmtx); return; }
   g_ring[g_rtail].len = len > MAX_UDP_PAYLOAD ? MAX_UDP_PAYLOAD : len;
   memcpy(g_ring[g_rtail].data, data, g_ring[g_rtail].len);
@@ -249,7 +253,11 @@ static void ring_push(const uint8_t* data, size_t len)
 static int ring_pop(pkt_t* out)
 {
   pthread_mutex_lock(&g_rmtx);
-  while (g_rcount == 0 && g_run) pthread_cond_wait(&g_rcond_nonempty, &g_rmtx);
+  while (g_rcount == 0 && g_run) {
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 50 * 1000 * 1000; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+    (void)pthread_cond_timedwait(&g_rcond_nonempty, &g_rmtx, &ts);
+  }
   if (!g_run) { pthread_mutex_unlock(&g_rmtx); return 0; }
   *out = g_ring[g_rhead];
   g_rhead = (g_rhead + 1) % RING_SIZE;
@@ -265,7 +273,11 @@ static void ring_push_front(const pkt_t* in)
   if (!in) return;
   pthread_mutex_lock(&g_rmtx);
   /* If full (shouldn't be right after a pop), wait just in case */
-  while (g_rcount == RING_SIZE && g_run) pthread_cond_wait(&g_rcond_nonfull, &g_rmtx);
+  while (g_rcount == RING_SIZE && g_run) {
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 50 * 1000 * 1000; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
+    (void)pthread_cond_timedwait(&g_rcond_nonfull, &g_rmtx, &ts);
+  }
   if (!g_run) { pthread_mutex_unlock(&g_rmtx); return; }
   /* Move head backwards and place packet */
   g_rhead = (g_rhead == 0) ? (RING_SIZE - 1) : (g_rhead - 1);
@@ -649,6 +661,9 @@ int main(int argc, char** argv) {
   }
 
   signal(SIGINT, on_sigint);
+  signal(SIGTERM, on_sigint);
+  signal(SIGHUP, on_sigint);
+  signal(SIGPIPE, SIG_IGN);
   /* Define local T_epoch as process start time; may be overridden by MX */
   g_epoch_start_us = mono_us_raw();
   /* Control sync disabled by default */
