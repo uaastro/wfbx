@@ -559,7 +559,8 @@ static void* thr_sched(void* arg)
       g_seq = (uint16_t)((g_seq + 1) & 0x0fff);
       g_sent_in_window++;
       g_sent_period++;
-      t_next_send = now + (uint64_t)g_delta_us + (uint64_t)A_us + (uint64_t)g_tau_max_us;
+      /* delta_us/tau_max_us are already reflected in guards and T_close; pace by airtime only */
+      t_next_send = now + (uint64_t)A_us;
     }
   }
   return NULL;
