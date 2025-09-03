@@ -399,12 +399,16 @@ static uint64_t g_sent_in_window = 0;
 static uint64_t g_drop_in_window = 0;
 static uint64_t g_tx_t0_ms = 0;
 static uint64_t g_sent_period = 0;
-static uint64_t g_drop_period = 0;
 static uint64_t g_slot_sent_sum = 0;
 static uint64_t g_slot_sent_min = UINT64_MAX;
 static uint64_t g_slot_sent_max = 0;
 static uint64_t g_slot_count    = 0;
 static pthread_mutex_t g_stat_mtx = PTHREAD_MUTEX_INITIALIZER;
+/* Buffer-left-at-slot-end statistics over the reporting period */
+static uint64_t g_buf_left_sum = 0;
+static uint64_t g_buf_left_min = UINT64_MAX;
+static uint64_t g_buf_left_max = 0;
+static uint64_t g_buf_left_cnt = 0;
 
 static void* thr_udp_rx(void* arg)
 {
@@ -474,22 +478,33 @@ static void* thr_sched(void* arg)
       uint64_t slot_avg = (g_slot_count > 0) ? (g_slot_sent_sum / g_slot_count) : 0;
       uint64_t slot_min = (g_slot_count > 0) ? g_slot_sent_min : 0;
       uint64_t slot_max = (g_slot_count > 0) ? g_slot_sent_max : 0;
-      fprintf(stderr, "[TX STAT] dt=%d ms | udp_rx=%llu | sent=%llu | drop=%llu | slot_sent avg=%llu min=%llu max=%llu\n",
+      uint64_t buf_avg  = (g_buf_left_cnt > 0) ? (g_buf_left_sum / g_buf_left_cnt) : 0;
+      uint64_t buf_min  = (g_buf_left_cnt > 0) ? g_buf_left_min : 0;
+      uint64_t buf_max  = (g_buf_left_cnt > 0) ? g_buf_left_max : 0;
+      /* Line 1: period udp_rx and sent */
+      fprintf(stderr, "[TX STAT] dt=%d ms | udp_rx=%llu | sent=%llu |\n",
               g_stat_period_ms,
               (unsigned long long)udp_rx,
-              (unsigned long long)g_sent_period,
-              (unsigned long long)g_drop_period,
+              (unsigned long long)g_sent_period);
+      /* Line 2: buffer-left and per-slot send stats */
+      fprintf(stderr, "[TX STAT] buf_left avg=%llu min=%llu max=%llu | slot_sent avg=%llu min=%llu max=%llu\n",
+              (unsigned long long)buf_avg,
+              (unsigned long long)buf_min,
+              (unsigned long long)buf_max,
               (unsigned long long)slot_avg,
               (unsigned long long)slot_min,
               (unsigned long long)slot_max);
       /* reset period counters */
       g_tx_t0_ms    = now_ms_tick;
       g_sent_period = 0;
-      g_drop_period = 0;
       g_slot_sent_sum = 0;
       g_slot_sent_min = UINT64_MAX;
       g_slot_sent_max = 0;
       g_slot_count    = 0;
+      g_buf_left_sum = 0;
+      g_buf_left_min = UINT64_MAX;
+      g_buf_left_max = 0;
+      g_buf_left_cnt = 0;
     }
     int advanced = epoch_switch_if_needed(now);
     if (advanced) {
@@ -526,6 +541,14 @@ static void* thr_sched(void* arg)
       continue;
     }
     if (now > T_close) {
+      /* Capture buffer occupancy at slot end */
+      pthread_mutex_lock(&g_rmtx);
+      uint64_t buf_left = g_rcount;
+      pthread_mutex_unlock(&g_rmtx);
+      g_buf_left_sum += buf_left;
+      if (g_buf_left_min == UINT64_MAX || buf_left < g_buf_left_min) g_buf_left_min = buf_left;
+      if (buf_left > g_buf_left_max) g_buf_left_max = buf_left;
+      g_buf_left_cnt++;
       uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL);
       t_next_send = 0;
       continue;
