@@ -483,11 +483,11 @@ int main(int argc, char** argv)
         /* Compute airtime from actual PHY (HT) */
         uint32_t A_us = airtime_us_rx(v.payload_len, &rs);
 
-        /* Epoch estimate if TS_tx present */
+        /* Epoch estimate if TS_tx present (no smoothing) */
         if (have_ts_tx) {
           int64_t inst = (int64_t)t_loc_us - (int64_t)cli.delta_us - (int64_t)A_us - (int64_t)cli.tau_us - (int64_t)TS_tx_us;
           uint64_t T_epoch_instant = (inst < 0) ? 0ull : (uint64_t)inst;
-          /* residual before updating EMA */
+          /* residual relative to previous hat (if any) */
           if (have_epoch) {
             int64_t e = (int64_t)T_epoch_instant - (int64_t)epoch_hat_us;
             if (e_us_samples == 0) { e_us_min = e; e_us_max = e; }
@@ -496,13 +496,10 @@ int main(int argc, char** argv)
             e_us_sum += e;
             e_us_samples++;
           }
-          if (!have_epoch) { epoch_hat_us = T_epoch_instant; have_epoch = 1; }
-          else {
-            double hat = (1.0 - cli.alpha) * (double)epoch_hat_us + cli.alpha * (double)T_epoch_instant;
-            if (hat < 0.0) hat = 0.0;
-            epoch_hat_us = (uint64_t)(hat + 0.5);
-          }
-          /* If TX epoch present, accumulate e_epoch_instant and e_epoch_hat */
+          /* No EMA: hat equals instant */
+          epoch_hat_us = T_epoch_instant;
+          have_epoch = 1;
+          /* TX epoch comparisons */
           if (have_epoch_tx) {
             int64_t e_inst = (int64_t)T_epoch_instant - (int64_t)epoch_tx_us;
             if (e_epoch_inst_samples == 0) { e_epoch_inst_min = e_inst; e_epoch_inst_max = e_inst; }

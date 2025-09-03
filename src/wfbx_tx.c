@@ -160,6 +160,7 @@ static uint32_t g_delta_us      = 1500;
 static uint32_t g_tau_max_us    = 0;
 static uint32_t g_eps_us        = 250;
 static double   g_d_max_km      = 0.0; /* CLI: max distance; drives g_tau_max_us */
+static uint32_t g_send_guard_us = 200; /* pacing guard between packets (us) */
 
 /* Control socket (UDS DGRAM) */
 static int g_cs = -1;
@@ -579,7 +580,7 @@ static void* thr_sched(void* arg)
       g_sent_in_window++;
       g_sent_period++;
       /* delta_us/tau_max_us are already reflected in guards and T_close; pace by airtime only */
-      t_next_send = now + (uint64_t)A_us;
+      t_next_send = now + (uint64_t)A_us + (uint64_t)g_send_guard_us;
     }
   }
   return NULL;
@@ -652,6 +653,7 @@ int main(int argc, char** argv) {
     {"delta_us",   required_argument, 0, 0},
     {"d_max",      required_argument, 0, 0},
     {"eps_us",     required_argument, 0, 0},
+    {"send_gi",    required_argument, 0, 0},
     {0,0,0,0}
   };
 
@@ -690,6 +692,7 @@ int main(int argc, char** argv) {
       else if (strcmp(name,"delta_us")==0)    g_delta_us     = (uint32_t)atoi(val);
       else if (strcmp(name,"d_max")==0)       g_d_max_km     = atof(val);
       else if (strcmp(name,"eps_us")==0)      g_eps_us       = (uint32_t)atoi(val);
+      else if (strcmp(name,"send_gi")==0)     g_send_guard_us= (uint32_t)atoi(val);
     }
   }
 
