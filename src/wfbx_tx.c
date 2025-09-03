@@ -580,7 +580,6 @@ static void* thr_sched(void* arg)
       /* Put the packet back to the front so it goes first in the next window */
       ring_push_front(&p);
       g_drop_in_window++;
-      g_drop_period++;
       /* Sleep until next superframe to avoid busy loop */
       uint64_t dt = (T_next > now) ? (T_next - now) : 1000;
       struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)};
