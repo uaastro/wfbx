@@ -571,6 +571,15 @@ static void* thr_sched(void* arg)
       now = mono_us_raw();
     }
     if (now > T_close) {
+      /* We already popped one packet (p) from the ring; account buffer-left including it */
+      pthread_mutex_lock(&g_rmtx);
+      uint64_t buf_left2 = g_rcount + 1; /* include currently popped packet */
+      pthread_mutex_unlock(&g_rmtx);
+      g_buf_left_sum += buf_left2;
+      if (g_buf_left_min == UINT64_MAX || buf_left2 < g_buf_left_min) g_buf_left_min = buf_left2;
+      if (buf_left2 > g_buf_left_max) g_buf_left_max = buf_left2;
+      g_buf_left_cnt++;
+      /* return packet and wait next superframe */
       ring_push_front(&p);
       uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL);
       t_next_send = 0;
