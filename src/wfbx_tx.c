@@ -161,6 +161,7 @@ static uint32_t g_tau_max_us    = 0;
 static uint32_t g_eps_us        = 250;
 static double   g_d_max_km      = 0.0; /* CLI: max distance; drives g_tau_max_us */
 static uint32_t g_send_guard_us = 200; /* pacing guard between packets (us) */
+static uint32_t g_buf_guard_pkts = 2;  /* keep last N packets in ring at slot boundary */
 
 /* Control socket (UDS DGRAM) */
 static int g_cs = -1;
@@ -287,6 +288,29 @@ static void ring_push_front(const pkt_t* in)
   g_rcount++;
   pthread_cond_signal(&g_rcond_nonempty);
   pthread_mutex_unlock(&g_rmtx);
+}
+
+/* Purge ring buffer keeping only the last `keep` most recently received packets.
+ * Returns number of packets dropped. Thread-safe. */
+static size_t ring_purge_keep_last(size_t keep)
+{
+  pthread_mutex_lock(&g_rmtx);
+  size_t dropped = 0;
+  if (keep == 0) {
+    dropped = g_rcount;
+    g_rhead = g_rtail; /* empty */
+    g_rcount = 0;
+  } else if (g_rcount > keep) {
+    dropped = g_rcount - keep;
+    /* New head points to the first of the last `keep` packets */
+    size_t new_head = (g_rtail + RING_SIZE - (keep % RING_SIZE)) % RING_SIZE;
+    g_rhead = new_head;
+    g_rcount = keep;
+  }
+  /* wake potential pushers */
+  pthread_cond_signal(&g_rcond_nonfull);
+  pthread_mutex_unlock(&g_rmtx);
+  return dropped;
 }
 
 /* ---- Epoch triple with mutex ---- */
@@ -499,7 +523,10 @@ static void* thr_sched(void* arg)
       if (g_sent_in_window > g_slot_sent_max) g_slot_sent_max = g_sent_in_window;
       g_slot_count++;
       g_sent_in_window = 0;
-      g_drop_in_window = 0;
+      /* Drop all but last N packets from ring buffer as guard to prevent buildup */
+      size_t dropped = ring_purge_keep_last(g_buf_guard_pkts);
+      g_drop_in_window = dropped;
+      g_drop_period += dropped;
       /* Apply pending epoch correction (if any) exactly at boundary */
       if (g_ctrl_enabled) {
         uint64_t pending = 0; int have = 0;
@@ -526,6 +553,9 @@ static void* thr_sched(void* arg)
       continue;
     }
     if (now > T_close) {
+      /* Slot ended: purge buffer now, keeping last N packets */
+      size_t dropped2 = ring_purge_keep_last(g_buf_guard_pkts);
+      g_drop_period += dropped2;
       uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL);
       t_next_send = 0;
       continue;
@@ -554,11 +584,10 @@ static void* thr_sched(void* arg)
       continue;
     }
     if (now + g_delta_us + A_us + g_tau_max_us + g_eps_us > T_close) {
-      /* Put the packet back to the front so it goes first in the next window */
+      /* Cannot fit: defer to next superframe, then purge buffer (keep last N) */
       ring_push_front(&p);
-      g_drop_in_window++;
-      g_drop_period++;
-      /* Sleep until next superframe to avoid busy loop */
+      size_t dropped3 = ring_purge_keep_last(g_buf_guard_pkts);
+      g_drop_period += dropped3;
       uint64_t dt = (T_next > now) ? (T_next - now) : 1000;
       struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)};
       nanosleep(&ts, NULL);
@@ -654,6 +683,7 @@ int main(int argc, char** argv) {
     {"d_max",      required_argument, 0, 0},
     {"eps_us",     required_argument, 0, 0},
     {"send_gi",    required_argument, 0, 0},
+    {"buf_guard",  required_argument, 0, 0},
     {0,0,0,0}
   };
 
@@ -693,6 +723,7 @@ int main(int argc, char** argv) {
       else if (strcmp(name,"d_max")==0)       g_d_max_km     = atof(val);
       else if (strcmp(name,"eps_us")==0)      g_eps_us       = (uint32_t)atoi(val);
       else if (strcmp(name,"send_gi")==0)     g_send_guard_us= (uint32_t)atoi(val);
+      else if (strcmp(name,"buf_guard")==0)   g_buf_guard_pkts = (uint32_t)atoi(val);
     }
   }
 
