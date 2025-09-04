@@ -294,7 +294,7 @@ static void print_help(const char* prog)
 static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
 {
   cfg->ip = g_dest_ip_default; cfg->port = g_dest_port_default; cfg->n_if = 0; cfg->stat_period_ms = 1000; cfg->txf.mode = TXF_ANY;
-  cfg->alpha = 0.3; cfg->tau_us = 0; cfg->delta_us = 1500; cfg->ctrl_addr = "@wfbx.mx"; cfg->epoch_len_us = 0; cfg->epoch_gi_us = 0; cfg->d_max_km = 0.0;
+  cfg->alpha = 0.3; cfg->tau_us = 0; cfg->delta_us = 700; cfg->ctrl_addr = "@wfbx.mx"; cfg->epoch_len_us = 0; cfg->epoch_gi_us = 0; cfg->d_max_km = 0.0;
   static struct option longopts[] = {
     {"ip",           required_argument, 0, 0},
     {"port",         required_argument, 0, 0},
@@ -452,32 +452,20 @@ int main(int argc, char** argv)
         /* Local RX software timestamp (end of delivery) */
         uint64_t t_loc_us = mono_us_raw();
 
-        /* Parse trailer at the end if present; support 20/12/8 bytes */
+        /* New trailer: last 8B = T_pkt_send_TX_us (driver), previous 8B = T_epoch_TX_us (app) */
         uint32_t TS_tx_us = 0; int have_ts_tx = 0;
-        uint64_t t0_ns = 0;    int have_t0 = 0;
         uint64_t epoch_tx_us = 0; int have_epoch_tx = 0;
+        uint64_t t_send_tx_us = 0;
         size_t trailer_found = 0;
-        if (v.payload_len >= WFBX_TRAILER_BYTES) {
-          struct wfbx_mesh_trailer tr;
-          memcpy(&tr, v.payload + (v.payload_len - WFBX_TRAILER_BYTES), sizeof(tr));
-          TS_tx_us = le32toh(tr.ts_tx_us_le); have_ts_tx = 1;
-          t0_ns    = le64toh(tr.t0_ns_le);    have_t0 = 1;
-          epoch_tx_us = le64toh(tr.epoch_us_le); have_epoch_tx = 1;
-          trailer_found = WFBX_TRAILER_BYTES;
-        } else if (v.payload_len >= WFBX_TRAILER12_BYTES) {
-          /* legacy 12B: ts_tx(4) + t0_ns(8) */
-          uint32_t ts_le; uint64_t t0_le;
-          memcpy(&ts_le, v.payload + (v.payload_len - WFBX_TRAILER12_BYTES), 4);
-          memcpy(&t0_le, v.payload + (v.payload_len - 8), 8);
-          TS_tx_us = le32toh(ts_le); have_ts_tx = 1;
-          t0_ns    = le64toh(t0_le); have_t0 = 1;
-          trailer_found = WFBX_TRAILER12_BYTES;
-        } else if (v.payload_len >= WFBX_TRAILER8_BYTES) {
-          /* legacy 8B: t0_ns only */
-          uint64_t t0_le;
-          memcpy(&t0_le, v.payload + (v.payload_len - WFBX_TRAILER8_BYTES), 8);
-          t0_ns = le64toh(t0_le); have_t0 = 1;
-          trailer_found = WFBX_TRAILER8_BYTES;
+        if (v.payload_len >= 16) {
+          uint64_t epoch_le, send_le;
+          memcpy(&epoch_le, v.payload + (v.payload_len - 16), 8);
+          memcpy(&send_le,  v.payload + (v.payload_len - 8),  8);
+          epoch_tx_us = le64toh(epoch_le); have_epoch_tx = 1;
+          t_send_tx_us = le64toh(send_le);
+          TS_tx_us = (uint32_t)(t_send_tx_us - epoch_tx_us);
+          have_ts_tx = 1;
+          trailer_found = 16;
         }
 
         /* Compute airtime from actual PHY (HT) */
@@ -516,10 +504,9 @@ int main(int argc, char** argv)
           }
         }
 
-        /* Real delta_us (host-host), excluding airtime */
-        if (have_t0) {
-          int64_t t0_us = (int64_t)(t0_ns / 1000ull);
-          int64_t real_du = (int64_t)t_loc_us - (int64_t)A_us - t0_us; /* tau_us≈0 per test */
+        /* Real delta_us (host-host), using TX send timestamp */
+        if (t_send_tx_us != 0) {
+          int64_t real_du = (int64_t)t_loc_us - (int64_t)A_us - (int64_t)t_send_tx_us; /* tau_us≈0 per test */
           if (real_delta_samples == 0) { real_delta_min = real_du; real_delta_max = real_du; }
           if (real_du < real_delta_min) real_delta_min = real_du;
           if (real_du > real_delta_max) real_delta_max = real_du;
