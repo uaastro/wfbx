@@ -222,72 +222,122 @@ static __attribute__((unused)) void ctrl_drain(void)
   }
 }
 
-/* ---- Simple ring buffer for UDP packets ---- */
+/* ---- Double-linked list buffer with node pool (no malloc in hot path) ---- */
 typedef struct {
   size_t len;
   uint8_t data[MAX_UDP_PAYLOAD];
 } pkt_t;
 
-#define RING_SIZE 1024
-static pkt_t g_ring[RING_SIZE];
-static size_t g_rhead = 0, g_rtail = 0, g_rcount = 0;
-static pthread_mutex_t g_rmtx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t g_rcond_nonempty = PTHREAD_COND_INITIALIZER;
-static pthread_cond_t g_rcond_nonfull  = PTHREAD_COND_INITIALIZER;
+#define BUF_CAPACITY 1024
 
-static void ring_push(const uint8_t* data, size_t len)
+typedef struct pkt_node {
+  struct pkt_node* prev;
+  struct pkt_node* next;
+  struct pkt_node* pool_next; /* singly-linked free list */
+  pkt_t pkt;
+} pkt_node;
+
+typedef struct {
+  /* list */
+  pkt_node* head;
+  pkt_node* tail;
+  size_t size;
+  /* pool */
+  pkt_node* pool_head;
+  size_t    pool_count;
+  pkt_node  storage[BUF_CAPACITY];
+  /* sync */
+  pthread_mutex_t mtx;
+  pthread_cond_t  not_empty;
+} dl_list;
+
+static dl_list g_buf;
+static uint64_t g_buf_drop_period = 0; /* dropped oldest on overflow in producer */
+
+static void dl_init(dl_list* L)
 {
-  pthread_mutex_lock(&g_rmtx);
-  while (g_rcount == RING_SIZE && g_run) {
-    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_nsec += 50 * 1000 * 1000; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
-    (void)pthread_cond_timedwait(&g_rcond_nonfull, &g_rmtx, &ts);
-  }
-  if (!g_run) { pthread_mutex_unlock(&g_rmtx); return; }
-  g_ring[g_rtail].len = len > MAX_UDP_PAYLOAD ? MAX_UDP_PAYLOAD : len;
-  memcpy(g_ring[g_rtail].data, data, g_ring[g_rtail].len);
-  g_rtail = (g_rtail + 1) % RING_SIZE;
-  g_rcount++;
-  pthread_cond_signal(&g_rcond_nonempty);
-  pthread_mutex_unlock(&g_rmtx);
+  memset(L, 0, sizeof(*L));
+  pthread_mutex_init(&L->mtx, NULL);
+  pthread_cond_init(&L->not_empty, NULL);
+  /* build pool */
+  L->pool_head = &L->storage[0];
+  L->pool_count = BUF_CAPACITY;
+  for (size_t i=0;i<BUF_CAPACITY-1;i++) L->storage[i].pool_next = &L->storage[i+1];
+  L->storage[BUF_CAPACITY-1].pool_next = NULL;
 }
 
-static int ring_pop(pkt_t* out)
+static inline pkt_node* pool_get(dl_list* L){ pkt_node* n=L->pool_head; if (n){ L->pool_head=n->pool_next; L->pool_count--; n->prev=n->next=NULL; } return n; }
+static inline void pool_put(dl_list* L, pkt_node* n){ n->prev=n->next=NULL; n->pool_next=L->pool_head; L->pool_head=n; L->pool_count++; }
+
+/* producer push_back with overflow policy: drop oldest */
+static void dl_push_back_drop_oldest(dl_list* L, const uint8_t* data, size_t len)
 {
-  pthread_mutex_lock(&g_rmtx);
-  while (g_rcount == 0 && g_run) {
-    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_nsec += 50 * 1000 * 1000; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
-    (void)pthread_cond_timedwait(&g_rcond_nonempty, &g_rmtx, &ts);
+  pthread_mutex_lock(&L->mtx);
+  if (L->pool_count == 0) {
+    /* drop oldest (head) */
+    if (L->head) {
+      pkt_node* h = L->head;
+      L->head = h->next; if (L->head) L->head->prev = NULL; else L->tail = NULL;
+      L->size--;
+      pool_put(L, h);
+      g_buf_drop_period++;
+    }
   }
-  if (!g_run) { pthread_mutex_unlock(&g_rmtx); return 0; }
-  *out = g_ring[g_rhead];
-  g_rhead = (g_rhead + 1) % RING_SIZE;
-  g_rcount--;
-  pthread_cond_signal(&g_rcond_nonfull);
-  pthread_mutex_unlock(&g_rmtx);
-  return 1;
+  pkt_node* n = pool_get(L);
+  if (n) {
+    n->pkt.len = len > MAX_UDP_PAYLOAD ? MAX_UDP_PAYLOAD : len;
+    memcpy(n->pkt.data, data, n->pkt.len);
+    /* append */
+    if (!L->tail) { L->head = L->tail = n; }
+    else { n->prev = L->tail; L->tail->next = n; L->tail = n; }
+    L->size++;
+    pthread_cond_signal(&L->not_empty);
+  }
+  pthread_mutex_unlock(&L->mtx);
 }
 
-/* Push a packet back to the head (front) of the ring. Assumes there is space. */
-static void ring_push_front(const pkt_t* in)
+/* consumer pop_front; blocks (timed) until not empty or g_run false */
+static int dl_pop_front(dl_list* L, pkt_t* out)
 {
-  if (!in) return;
-  pthread_mutex_lock(&g_rmtx);
-  /* If full (shouldn't be right after a pop), wait just in case */
-  while (g_rcount == RING_SIZE && g_run) {
+  int ok = 0;
+  pthread_mutex_lock(&L->mtx);
+  while (L->size == 0 && g_run) {
     struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_nsec += 50 * 1000 * 1000; if (ts.tv_nsec >= 1000000000L) { ts.tv_sec += 1; ts.tv_nsec -= 1000000000L; }
-    (void)pthread_cond_timedwait(&g_rcond_nonfull, &g_rmtx, &ts);
+    (void)pthread_cond_timedwait(&L->not_empty, &L->mtx, &ts);
   }
-  if (!g_run) { pthread_mutex_unlock(&g_rmtx); return; }
-  /* Move head backwards and place packet */
-  g_rhead = (g_rhead == 0) ? (RING_SIZE - 1) : (g_rhead - 1);
-  g_ring[g_rhead] = *in;
-  g_rcount++;
-  pthread_cond_signal(&g_rcond_nonempty);
-  pthread_mutex_unlock(&g_rmtx);
+  if (!g_run) { pthread_mutex_unlock(&L->mtx); return 0; }
+  pkt_node* h = L->head;
+  if (h) {
+    *out = h->pkt;
+    L->head = h->next; if (L->head) L->head->prev = NULL; else L->tail = NULL;
+    L->size--;
+    pool_put(L, h);
+    ok = 1;
+  }
+  pthread_mutex_unlock(&L->mtx);
+  return ok;
 }
+
+/* consumer push_front (used when deferring to next slot) */
+static int dl_push_front(dl_list* L, const pkt_t* in)
+{
+  int ok = 0;
+  pthread_mutex_lock(&L->mtx);
+  pkt_node* n = pool_get(L);
+  if (n) {
+    n->pkt = *in;
+    if (!L->head) { L->head = L->tail = n; }
+    else { n->next = L->head; L->head->prev = n; L->head = n; }
+    L->size++;
+    pthread_cond_signal(&L->not_empty);
+    ok = 1;
+  }
+  pthread_mutex_unlock(&L->mtx);
+  return ok;
+}
+
+static inline size_t dl_size(dl_list* L){ size_t s; pthread_mutex_lock(&L->mtx); s=L->size; pthread_mutex_unlock(&L->mtx); return s; }
 
 /* ---- Epoch triple with mutex ---- */
 typedef struct {
@@ -554,7 +604,7 @@ static void* thr_sched(void* arg)
       continue;
     }
 
-    pkt_t p; if (!ring_pop(&p)) continue;
+    pkt_t p; if (!dl_pop_front(&g_buf, &p)) continue;
 
     /* Recompute slot window after potential wait in ring_pop to avoid using stale boundaries */
     pthread_mutex_lock(&g_epoch.mtx);
@@ -571,23 +621,21 @@ static void* thr_sched(void* arg)
       now = mono_us_raw();
     }
     if (now > T_close) {
-      /* We already popped one packet (p) from the ring; account buffer-left including it */
-      pthread_mutex_lock(&g_rmtx);
-      uint64_t buf_left2 = g_rcount + 1; /* include currently popped packet */
-      pthread_mutex_unlock(&g_rmtx);
+      /* We already popped one packet (p); account buffer-left including it */
+      uint64_t buf_left2 = dl_size(&g_buf) + 1;
       g_buf_left_sum += buf_left2;
       if (g_buf_left_min == UINT64_MAX || buf_left2 < g_buf_left_min) g_buf_left_min = buf_left2;
       if (buf_left2 > g_buf_left_max) g_buf_left_max = buf_left2;
       g_buf_left_cnt++;
       /* return packet and wait next superframe */
-      ring_push_front(&p);
+      (void)dl_push_front(&g_buf, &p);
       uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL);
       t_next_send = 0;
       continue;
     }
     if (now + g_delta_us + A_us + g_tau_max_us + g_eps_us > T_close) {
       /* Put the packet back to the front so it goes first in the next window */
-      ring_push_front(&p);
+      (void)dl_push_front(&g_buf, &p);
       g_drop_in_window++;
       /* Sleep until next superframe to avoid busy loop */
       uint64_t dt = (T_next > now) ? (T_next - now) : 1000;
@@ -764,6 +812,8 @@ int main(int argc, char** argv) {
   signal(SIGPIPE, SIG_IGN);
   /* Define local T_epoch as process start time; may be overridden by MX */
   g_epoch_start_us = mono_us_raw();
+  /* Init list buffer */
+  dl_init(&g_buf);
   /* Control sync disabled by default */
   if (g_ctrl_enabled) (void)ctrl_init(mx_addr_cli, (uint8_t)tx_id);
   /* Derive tau_max_us from d_max (km): c≈299792.458 km/s ⇒ 3.335641 µs/km */
