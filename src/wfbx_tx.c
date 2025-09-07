@@ -468,7 +468,7 @@ static void* thr_udp_rx(void* arg)
     ssize_t n = recv(g_usock, buf, sizeof(buf), 0);
     if (n < 0) { if (errno==EINTR) continue; if (errno==EAGAIN||errno==EWOULDBLOCK){ usleep(1000); continue; } perror("recv"); break; }
     if (n == 0) continue;
-    ring_push(buf, (size_t)n);
+    dl_push_back_drop_oldest(&g_buf, buf, (size_t)n);
     /* Count only successfully received UDP datagrams */
     g_rx_count_period++;
   }
@@ -592,9 +592,7 @@ static void* thr_sched(void* arg)
     }
     if (now > T_close) {
       /* Capture buffer occupancy at slot end */
-      pthread_mutex_lock(&g_rmtx);
-      uint64_t buf_left = g_rcount;
-      pthread_mutex_unlock(&g_rmtx);
+      uint64_t buf_left = dl_size(&g_buf);
       g_buf_left_sum += buf_left;
       if (g_buf_left_min == UINT64_MAX || buf_left < g_buf_left_min) g_buf_left_min = buf_left;
       if (buf_left > g_buf_left_max) g_buf_left_max = buf_left;
