@@ -81,6 +81,83 @@ static inline uint64_t mono_us_raw(void) {
   return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
 }
 
+/* ---- Global dedup per TX (12-bit seq) and stats containers ---- */
+struct seq_window {
+  uint16_t base;      /* first seq covered by bit0 */
+  uint64_t bits[2];   /* 128 bits window */
+};
+static void seqwin_init(struct seq_window* w){ w->base = 0; w->bits[0]=w->bits[1]=0; }
+static inline uint16_t mod_fwd(uint16_t a, uint16_t b){ return (uint16_t)((b - a) & 0x0FFF); }
+/* test/set; returns 1 if already seen, 0 if newly set */
+static int seqwin_check_set(struct seq_window* w, uint16_t s)
+{
+  uint16_t d = mod_fwd(w->base, s);
+  if (d < 4096) {
+    if (d >= 128) {
+      uint16_t shift = (uint16_t)(d - 127);
+      if (shift >= 128) { w->bits[0]=w->bits[1]=0; w->base = (uint16_t)((w->base + shift) & 0x0FFF); }
+      else {
+        uint64_t new0, new1;
+        if (shift >= 64) { new0 = w->bits[1] >> (shift - 64); new1 = 0; }
+        else { new0 = (w->bits[0] >> shift) | (w->bits[1] << (64 - shift)); new1 = (w->bits[1] >> shift); }
+        w->bits[0]=new0; w->bits[1]=new1;
+        w->base = (uint16_t)((w->base + shift) & 0x0FFF);
+      }
+      d = 127;
+    }
+    uint64_t* word = (d < 64) ? &w->bits[0] : &w->bits[1];
+    int bit = (d < 64) ? d : (d - 64);
+    uint64_t mask = (uint64_t)1 << bit;
+    int already = ((*word) & mask) ? 1 : 0;
+    *word |= mask;
+    return already;
+  }
+  return 0;
+}
+
+#define MAX_TX_IDS 256
+struct tx_stats {
+  uint64_t pkts;            /* unique pkts (dedup across ifaces) */
+  int rssi_min;             /* best-chain RSSI */
+  int rssi_max;
+  int64_t rssi_sum;
+  uint32_t rssi_samples;
+  /* Epoch estimator per TX */
+  int have_epoch;
+  uint64_t epoch_hat_us;    /* smoothed */
+};
+
+struct if_stats {
+  uint64_t pkts;            /* pkts seen on this iface (no dedup across ifaces) */
+  int rssi_min;             /* best-chain RSSI */
+  int rssi_max;
+  int64_t rssi_sum;
+  uint32_t rssi_samples;
+};
+
+static struct tx_stats TX[MAX_TX_IDS];
+static struct if_stats IFST[MAX_IFS];
+static struct seq_window SWG[MAX_TX_IDS];
+
+static void stats_reset_period(int n_if)
+{
+  for (int t=0;t<MAX_TX_IDS;++t) {
+    TX[t].pkts = 0;
+    TX[t].rssi_min = 127;
+    TX[t].rssi_max = -127;
+    TX[t].rssi_sum = 0;
+    TX[t].rssi_samples = 0;
+    /* keep epoch state across periods */
+  }
+  for (int i=0;i<n_if;++i) {
+    IFST[i].pkts = 0;
+    IFST[i].rssi_min = 127;
+    IFST[i].rssi_max = -127;
+    IFST[i].rssi_sum = 0;
+    IFST[i].rssi_samples = 0;
+  }
+}
+
 /* Radiotap RX parse with MCS */
 struct rt_stats {
   uint16_t rt_len;
@@ -371,6 +448,9 @@ int main(int argc, char** argv)
 
   uint64_t t0 = now_ms();
   uint64_t pkts = 0;
+  /* Init dedup windows per TX and reset per-period stats */
+  for (int t=0;t<MAX_TX_IDS;++t) seqwin_init(&SWG[t]);
+  stats_reset_period(n_open);
   /* Epoch estimation state */
   int have_epoch = 0;
   uint64_t epoch_hat_us = 0; /* T̂_epoch */
@@ -483,36 +563,42 @@ int main(int argc, char** argv)
         /* Compute airtime from actual PHY (HT) */
         uint32_t A_us = airtime_us_rx(v.payload_len, &rs);
 
-        /* Epoch estimate if TS_tx present (no smoothing) */
-        if (have_ts_tx) {
-          int64_t inst = (int64_t)t_loc_us - (int64_t)cli.delta_us - (int64_t)A_us - (int64_t)cli.tau_us - (int64_t)TS_tx_us;
-          uint64_t T_epoch_instant = (inst < 0) ? 0ull : (uint64_t)inst;
-          /* residual relative to previous hat (if any) */
-          if (have_epoch) {
-            int64_t e = (int64_t)T_epoch_instant - (int64_t)epoch_hat_us;
-            if (e_us_samples == 0) { e_us_min = e; e_us_max = e; }
-            if (e < e_us_min) e_us_min = e;
-            if (e > e_us_max) e_us_max = e;
-            e_us_sum += e;
-            e_us_samples++;
+        /* Per-interface stats (best-chain RSSI) */
+        int best_rssi = -127; int have_rssi = 0;
+        for (int c=0;c<rs.chains && c<RX_ANT_MAX; ++c) {
+          if (rs.rssi[c] != SCHAR_MIN) { if (!have_rssi || rs.rssi[c] > best_rssi) { best_rssi = rs.rssi[c]; have_rssi = 1; } }
+        }
+        IFST[i].pkts++;
+        if (have_rssi) {
+          if (best_rssi < IFST[i].rssi_min) IFST[i].rssi_min = best_rssi;
+          if (best_rssi > IFST[i].rssi_max) IFST[i].rssi_max = best_rssi;
+          IFST[i].rssi_sum += best_rssi;
+          IFST[i].rssi_samples++;
+        }
+
+        /* Per-TX global dedup + stats + epoch estimation */
+        uint8_t tx_id = v.h ? v.h->addr2[5] : 0;
+        int dup_global = seqwin_check_set(&SWG[tx_id], v.seq12);
+        if (!dup_global) {
+          TX[tx_id].pkts++;
+          if (have_rssi) {
+            if (best_rssi < TX[tx_id].rssi_min) TX[tx_id].rssi_min = best_rssi;
+            if (best_rssi > TX[tx_id].rssi_max) TX[tx_id].rssi_max = best_rssi;
+            TX[tx_id].rssi_sum += best_rssi;
+            TX[tx_id].rssi_samples++;
           }
-          /* No EMA: hat equals instant */
-          epoch_hat_us = T_epoch_instant;
-          have_epoch = 1;
-          /* TX epoch comparisons */
-          if (have_epoch_tx) {
-            int64_t e_inst = (int64_t)T_epoch_instant - (int64_t)epoch_tx_us;
-            if (e_epoch_inst_samples == 0) { e_epoch_inst_min = e_inst; e_epoch_inst_max = e_inst; }
-            if (e_inst < e_epoch_inst_min) e_epoch_inst_min = e_inst;
-            if (e_inst > e_epoch_inst_max) e_epoch_inst_max = e_inst;
-            e_epoch_inst_sum += e_inst;
-            e_epoch_inst_samples++;
-            int64_t e_hat = (int64_t)epoch_hat_us - (int64_t)epoch_tx_us;
-            if (e_epoch_hat_samples == 0) { e_epoch_hat_min = e_hat; e_epoch_hat_max = e_hat; }
-            if (e_hat < e_epoch_hat_min) e_epoch_hat_min = e_hat;
-            if (e_hat > e_epoch_hat_max) e_epoch_hat_max = e_hat;
-            e_epoch_hat_sum += e_hat;
-            e_epoch_hat_samples++;
+          if (have_ts_tx) {
+            int64_t inst = (int64_t)t_loc_us - (int64_t)cli.delta_us - (int64_t)A_us - (int64_t)cli.tau_us - (int64_t)TS_tx_us;
+            uint64_t T_epoch_instant = (inst < 0) ? 0ull : (uint64_t)inst;
+            if (!TX[tx_id].have_epoch) {
+              TX[tx_id].epoch_hat_us = T_epoch_instant;
+              TX[tx_id].have_epoch = 1;
+            } else {
+              double a = (cli.alpha < 0.0) ? 0.0 : (cli.alpha > 1.0 ? 1.0 : cli.alpha);
+              double hat = (1.0 - a) * (double)TX[tx_id].epoch_hat_us + a * (double)T_epoch_instant;
+              if (hat < 0.0) hat = 0.0;
+              TX[tx_id].epoch_hat_us = (uint64_t)(hat + 0.5);
+            }
           }
         }
 
@@ -549,9 +635,31 @@ stats_tick:
         double avg_real_du = (real_delta_samples > 0) ? ((double)real_delta_sum / (double)real_delta_samples) : 0.0;
         double avg_e_us    = (e_us_samples > 0) ? ((double)e_us_sum / (double)e_us_samples) : 0.0;
         double avg_e_delta = (e_delta_samples > 0) ? ((double)e_delta_sum / (double)e_delta_samples) : 0.0;
-        fprintf(stderr, "[MX] dt=%llu ms | pkts=%llu | T_epoch_hat=%llu us\n",
-                (unsigned long long)(t1-t0), (unsigned long long)pkts,
-                (unsigned long long)epoch_hat_us);
+        fprintf(stderr, "[MX] dt=%llu ms | pkts=%llu | ifaces=%d\n",
+                (unsigned long long)(t1-t0), (unsigned long long)pkts, n_open);
+        /* Per-interface stats */
+        for (int i2=0;i2<n_open;i2++) {
+          double avg_if = (IFST[i2].rssi_samples>0) ? ((double)IFST[i2].rssi_sum / (double)IFST[i2].rssi_samples) : 0.0;
+          fprintf(stderr, "  [IF %d] pkts=%llu | RSSI min=%d avg=%.1f max=%d\n",
+                  i2,
+                  (unsigned long long)IFST[i2].pkts,
+                  (int)IFST[i2].rssi_min,
+                  avg_if,
+                  (int)IFST[i2].rssi_max);
+        }
+        /* Per-TX stats (active) */
+        for (int tX=0;tX<MAX_TX_IDS;tX++) {
+          if (TX[tX].pkts == 0 && TX[tX].rssi_samples == 0 && !TX[tX].have_epoch) continue;
+          double avg_tx = (TX[tX].rssi_samples>0) ? ((double)TX[tX].rssi_sum / (double)TX[tX].rssi_samples) : 0.0;
+          fprintf(stderr, "  [TX %03d] pkts=%llu | RSSI min=%d avg=%.1f max=%d | T_epoch_hat=%s%llu\n",
+                  tX,
+                  (unsigned long long)TX[tX].pkts,
+                  (int)TX[tX].rssi_min,
+                  avg_tx,
+                  (int)TX[tX].rssi_max,
+                  TX[tX].have_epoch?"":"n/a",
+                  (unsigned long long)(TX[tX].have_epoch?TX[tX].epoch_hat_us:0ull));
+        }
         fprintf(stderr, "      real_delta_us: avg=%.1f min=%lld max=%lld n=%llu\n",
                 avg_real_du, (long long)real_delta_min, (long long)real_delta_max,
                 (unsigned long long)real_delta_samples);
@@ -566,6 +674,8 @@ stats_tick:
                   avg_e_epoch_hat,  (long long)e_epoch_hat_min,  (long long)e_epoch_hat_max,  (unsigned long long)e_epoch_hat_samples);
         }
         t0 = t1; pkts = 0;
+        /* Reset per-period iface/tx stats */
+        stats_reset_period(n_open);
         real_delta_sum = 0; real_delta_samples = 0;
         e_us_sum = 0; e_us_samples = 0;
         e_delta_sum = 0; e_delta_samples = 0;
