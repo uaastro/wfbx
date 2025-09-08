@@ -1,4 +1,14 @@
 // wfbx_rx.c — multi-interface 802.11 capture ....
+/* Feature test macros: expose BSD/GNU/POSIX APIs (u_char/usleep/inet_aton) */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#ifndef _BSD_SOURCE
+#define _BSD_SOURCE 1
+#endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 // - Supports multiple WLAN interfaces (positional args): receive diversity
 // - A frame is accepted if received on at least one interface (dedup by 12-bit seq)
 // - Per-antenna stats labeled ANTabc: a=iface index, bc=antenna index (00..99)

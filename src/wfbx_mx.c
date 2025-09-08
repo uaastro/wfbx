@@ -1,4 +1,14 @@
 // wfbx_mx.c — Mesh manager (RX side groundwork)
+/* Feature test macros: expose BSD/GNU/POSIX APIs (u_char/usleep/inet_aton) */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#ifndef _BSD_SOURCE
+#define _BSD_SOURCE 1
+#endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 // - Accepts any packets (tx_id filter defaults to ANY)
 // - Adds RX radiotap MCS parsing and airtime (A_us) computation for HT (802.11n) PHY
 // - Future work: estimate T_epoch, apply EMA, TDMA coordination
