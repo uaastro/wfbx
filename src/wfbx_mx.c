@@ -186,6 +186,10 @@ struct tx_detail {
   uint64_t unique_pkts;       /* dedup across ifaces */
   struct if_detail ifs[MAX_IFS];
   struct epoch_stats es_overall; /* earliest-arrival based */
+  /* Global loss across interfaces (on deduped stream) */
+  int have_seq_glob;
+  uint16_t expect_seq_glob;
+  uint32_t lost_glob;
 };
 
 static struct tx_stats TX[MAX_TX_IDS];
@@ -205,6 +209,9 @@ static void stats_reset_period(int n_if)
     TXD[t].unique_pkts = 0;
     /* zero per-TX epoch aggregates */
     memset(&TXD[t].es_overall, 0, sizeof(TXD[t].es_overall));
+    TXD[t].have_seq_glob = 0;
+    TXD[t].expect_seq_glob = 0;
+    TXD[t].lost_glob = 0;
     for (int i=0;i<n_if;i++) {
       struct if_detail* D = &TXD[t].ifs[i];
       D->pkts = 0; D->have_seq = 0; D->expect_seq = 0; D->lost = 0;
@@ -706,6 +713,19 @@ int main(int argc, char** argv)
             TX[tx_id].rssi_sum += pkt_best; TX[tx_id].rssi_samples++;
           }
           TXD[tx_id].unique_pkts++;
+          /* Global (deduped) loss tracking for TX */
+          if (!TXD[tx_id].have_seq_glob) {
+            TXD[tx_id].have_seq_glob = 1;
+            TXD[tx_id].expect_seq_glob = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+          } else {
+            if (v.seq12 != TXD[tx_id].expect_seq_glob) {
+              uint16_t gap = (uint16_t)((v.seq12 - TXD[tx_id].expect_seq_glob) & 0x0FFF);
+              TXD[tx_id].lost_glob += gap;
+              TXD[tx_id].expect_seq_glob = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+            } else {
+              TXD[tx_id].expect_seq_glob = (uint16_t)((TXD[tx_id].expect_seq_glob + 1) & 0x0FFF);
+            }
+          }
           if (have_ts_tx) {
             int64_t inst = (int64_t)t_loc_us - (int64_t)cli.delta_us - (int64_t)A_us - (int64_t)cli.tau_us - (int64_t)TS_tx_us;
             uint64_t T_epoch_instant = (inst < 0) ? 0ull : (uint64_t)inst;
@@ -792,11 +812,14 @@ stats_tick:
               }
             }
           }
-          fprintf(stderr, "  [TX %03d] upkts=%llu | RSSI min=%d avg=%.1f max=%d | QLT(bestChainAvg)=%s%d dBm\n",
-                  tX,(unsigned long long)TXD[tX].unique_pkts,(int)TX[tX].rssi_min,avg_tx_rssi,(int)TX[tX].rssi_max,
-                  best_chain_valid?"":"n/a ", best_chain_valid?best_chain_avg:0);
-          fprintf(stderr, "     Epoch: avg=%.1f min=%llu max=%llu n=%llu | real_delta avg=%.1f min=%lld max=%lld n=%llu | e_delta avg=%.1f min=%lld max=%lld n=%llu | e_epoch avg=%.1f min=%lld max=%lld n=%llu\n",
-                  avg_epoch,(unsigned long long)ES->epoch_min,(unsigned long long)ES->epoch_max,(unsigned long long)ES->epoch_samples,
+          /* TX-level QLT: based on deduped stream: unique / (unique + lost_glob) */
+          uint64_t exp_tx_total = TXD[tX].unique_pkts + (uint64_t)TXD[tX].lost_glob;
+          double qlt_tx = (exp_tx_total>0) ? (100.0 * (double)TXD[tX].unique_pkts / (double)exp_tx_total) : 0.0;
+          fprintf(stderr, "  [TX %03d] upkts=%llu lost=%u qlt=%.1f%% | RSSI min=%d avg=%.1f max=%d\n",
+                  tX,(unsigned long long)TXD[tX].unique_pkts,(unsigned)TXD[tX].lost_glob,qlt_tx,
+                  (int)TX[tX].rssi_min,avg_tx_rssi,(int)TX[tX].rssi_max);
+          /* Exclude epoch absolute values from stats output; keep timing error metrics only */
+          fprintf(stderr, "     timing: real_delta avg=%.1f min=%lld max=%lld n=%llu | e_delta avg=%.1f min=%lld max=%lld n=%llu | e_epoch avg=%.1f min=%lld max=%lld n=%llu\n",
                   avg_real,(long long)ES->real_delta_min,(long long)ES->real_delta_max,(unsigned long long)ES->real_delta_samples,
                   avg_ed,(long long)ES->e_delta_min,(long long)ES->e_delta_max,(unsigned long long)ES->e_delta_samples,
                   avg_ee,(long long)ES->e_epoch_min,(long long)ES->e_epoch_max,(unsigned long long)ES->e_epoch_samples);
@@ -825,14 +848,12 @@ stats_tick:
               fprintf(stderr, "      ANTa%02d: rssi min=%d avg=%.1f max=%d | lost=%u\n",
                       (int)AS->ant_id,(int)AS->rssi_min,av,(int)AS->rssi_max,(unsigned)AS->lost);
             }
-            /* Per-IF epoch stats */
+            /* Per-IF timing stats (exclude absolute epoch) */
             struct epoch_stats* EI = &D->es;
-            double aei = (EI->epoch_samples>0)?((double)EI->epoch_sum/(double)EI->epoch_samples):0.0;
             double ar  = (EI->real_delta_samples>0)?((double)EI->real_delta_sum/(double)EI->real_delta_samples):0.0;
             double ad  = (EI->e_delta_samples>0)?((double)EI->e_delta_sum/(double)EI->e_delta_samples):0.0;
             double ae  = (EI->e_epoch_samples>0)?((double)EI->e_epoch_sum/(double)EI->e_epoch_samples):0.0;
-            fprintf(stderr, "      Epoch: avg=%.1f min=%llu max=%llu n=%llu | real_delta avg=%.1f min=%lld max=%lld n=%llu | e_delta avg=%.1f min=%lld max=%lld n=%llu | e_epoch avg=%.1f min=%lld max=%lld n=%llu\n",
-                    aei,(unsigned long long)EI->epoch_min,(unsigned long long)EI->epoch_max,(unsigned long long)EI->epoch_samples,
+            fprintf(stderr, "      timing: real_delta avg=%.1f min=%lld max=%lld n=%llu | e_delta avg=%.1f min=%lld max=%lld n=%llu | e_epoch avg=%.1f min=%lld max=%lld n=%llu\n",
                     ar,(long long)EI->real_delta_min,(long long)EI->real_delta_max,(unsigned long long)EI->real_delta_samples,
                     ad,(long long)EI->e_delta_min,(long long)EI->e_delta_max,(unsigned long long)EI->e_delta_samples,
                     ae,(long long)EI->e_epoch_min,(long long)EI->e_epoch_max,(unsigned long long)EI->e_epoch_samples);
