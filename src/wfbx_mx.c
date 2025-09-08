@@ -3,6 +3,8 @@
 // - Adds RX radiotap MCS parsing and airtime (A_us) computation for HT (802.11n) PHY
 // - Future work: estimate T_epoch, apply EMA, TDMA coordination
 
+/* Ensure BSD typedefs (u_char/u_short/u_int) are available for libpcap */
+#include <sys/types.h>
 #include <pcap/pcap.h>
 #include <stdio.h>
 #include <stdint.h>

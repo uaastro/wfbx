@@ -2,6 +2,8 @@
 // Preserves CLI and behavior of udp2wfb.c; uses shared defs from wfb_defs.h.
 // Build: gcc -O2 -Wall -o wfbx_tx wfbx_tx.c -lpcap
 
+/* Ensure BSD typedefs (u_char/u_short/u_int) are available for libpcap */
+#include <sys/types.h>
 #include <pcap/pcap.h>
 #include <stdio.h>
 #include <stdint.h>

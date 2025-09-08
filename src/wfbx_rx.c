@@ -8,6 +8,8 @@
 //     Global: packets, bytes, kbps, lost, quality, RSSI(best-chain) min/avg/max
 //     Per-antenna (per interface): pkts, lost, quality, RSSI min/avg/max
 
+/* Some libpcap headers rely on BSD types (u_char/u_short/u_int) from sys/types.h */
+#include <sys/types.h>
 #include <pcap/pcap.h>
 #include <stdio.h>
 #include <stdint.h>
