@@ -81,6 +81,17 @@ static inline uint64_t mono_us_raw(void) {
   return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
 }
 
+/* Global Epoch instant tracker across all TX and IFs (modernized algorithm) */
+static int      g_have_epoch_inst = 0;
+static uint8_t  g_cur_tx_id = 0;
+static uint64_t g_cur_epoch_tx_us = 0;
+static uint64_t g_epoch_instant_us = 0;
+/* Global e_epoch (after tracker update): e_epoch = g_epoch_instant_us - epoch_tx_us */
+static int64_t  g_e_epoch_sum = 0;
+static int64_t  g_e_epoch_min = INT64_C(0);
+static int64_t  g_e_epoch_max = INT64_C(0);
+static uint64_t g_e_epoch_samples = 0;
+
 /* ---- Global dedup per TX (12-bit seq) and stats containers ---- */
 struct seq_window {
   uint16_t base;      /* first seq covered by bit0 */
@@ -190,6 +201,10 @@ struct tx_detail {
   int have_seq_glob;
   uint16_t expect_seq_glob;
   uint32_t lost_glob;
+  /* Modernized epoch tracking per TX: keep current epoch key and minimal T_epoch_instant_pkt */
+  int      have_cur_epoch;
+  uint64_t cur_epoch_tx_us;      /* epoch_tx_us key from trailer */
+  uint64_t cur_epoch_instant_us; /* minimal T_epoch_instant_pkt observed for this (tx,epoch) */
 };
 
 static struct tx_stats TX[MAX_TX_IDS];
@@ -538,11 +553,7 @@ int main(int argc, char** argv)
   int64_t real_delta_min = INT64_C(0);
   int64_t real_delta_max = INT64_C(0);
   uint64_t real_delta_samples = 0;
-  /* Residual e_us = T_epoch_instant - T̂_epoch statistics */
-  int64_t e_us_sum = 0;
-  int64_t e_us_min = INT64_C(0);
-  int64_t e_us_max = INT64_C(0);
-  uint64_t e_us_samples = 0;
+  /* Deprecated e_us removed */
   /* e_delta = delta_us - real_delta_us statistics */
   int64_t e_delta_sum = 0;
   int64_t e_delta_min = INT64_C(0);
@@ -676,15 +687,15 @@ int main(int argc, char** argv)
         /* Epoch metrics for this (TX,IF) */
         if (have_ts_tx) {
           int64_t inst = (int64_t)t_loc_us - (int64_t)cli.delta_us - (int64_t)A_us - (int64_t)cli.tau_us - (int64_t)TS_tx_us;
-          uint64_t T_epoch_instant = (inst < 0) ? 0ull : (uint64_t)inst;
+          uint64_t T_epoch_instant_pkt = (inst < 0) ? 0ull : (uint64_t)inst;
           int64_t real_du = (t_send_tx_us != 0) ? ((int64_t)t_loc_us - (int64_t)A_us - (int64_t)t_send_tx_us) : 0;
           int64_t e_d = (int64_t)cli.delta_us - real_du;
-          int64_t e_e = (have_epoch_tx) ? ((int64_t)T_epoch_instant - (int64_t)epoch_tx_us) : 0;
+          int64_t e_e = (have_epoch_tx) ? ((int64_t)T_epoch_instant_pkt - (int64_t)epoch_tx_us) : 0;
           struct epoch_stats* ES = &DID->es;
-          if (ES->epoch_samples == 0) { ES->epoch_min = T_epoch_instant; ES->epoch_max = T_epoch_instant; }
-          if (T_epoch_instant < ES->epoch_min) ES->epoch_min = T_epoch_instant;
-          if (T_epoch_instant > ES->epoch_max) ES->epoch_max = T_epoch_instant;
-          ES->epoch_sum += T_epoch_instant; ES->epoch_samples++;
+          if (ES->epoch_samples == 0) { ES->epoch_min = T_epoch_instant_pkt; ES->epoch_max = T_epoch_instant_pkt; }
+          if (T_epoch_instant_pkt < ES->epoch_min) ES->epoch_min = T_epoch_instant_pkt;
+          if (T_epoch_instant_pkt > ES->epoch_max) ES->epoch_max = T_epoch_instant_pkt;
+          ES->epoch_sum += T_epoch_instant_pkt; ES->epoch_samples++;
           if (t_send_tx_us != 0) {
             if (ES->real_delta_samples == 0) { ES->real_delta_min = real_du; ES->real_delta_max = real_du; }
             if (real_du < ES->real_delta_min) ES->real_delta_min = real_du;
@@ -700,6 +711,39 @@ int main(int argc, char** argv)
             if (e_e < ES->e_epoch_min) ES->e_epoch_min = e_e;
             if (e_e > ES->e_epoch_max) ES->e_epoch_max = e_e;
             ES->e_epoch_sum += e_e; ES->e_epoch_samples++;
+          }
+          /* Modernized per-TX epoch selection (per iface): update minimal T_epoch_instant_pkt per (tx, epoch_tx_us) */
+          if (have_epoch_tx) {
+            if (!TXD[tx_id].have_cur_epoch || TXD[tx_id].cur_epoch_tx_us != epoch_tx_us) {
+              TXD[tx_id].have_cur_epoch = 1;
+              TXD[tx_id].cur_epoch_tx_us = epoch_tx_us;
+              TXD[tx_id].cur_epoch_instant_us = (uint64_t)T_epoch_instant_pkt;
+            } else {
+              if ((uint64_t)T_epoch_instant_pkt < TXD[tx_id].cur_epoch_instant_us) {
+                TXD[tx_id].cur_epoch_instant_us = (uint64_t)T_epoch_instant_pkt;
+              }
+            }
+          }
+          /* Global T_epoch_instant tracker (pre-dedup, across all IFs) */
+          if (have_epoch_tx) {
+            if (!g_have_epoch_inst) {
+              g_have_epoch_inst = 1;
+              g_cur_tx_id = tx_id;
+              g_cur_epoch_tx_us = epoch_tx_us;
+              g_epoch_instant_us = T_epoch_instant_pkt;
+            } else if (g_cur_tx_id == tx_id && g_cur_epoch_tx_us == epoch_tx_us) {
+              if (T_epoch_instant_pkt < g_epoch_instant_us) g_epoch_instant_us = T_epoch_instant_pkt;
+            } else {
+              g_cur_tx_id = tx_id;
+              g_cur_epoch_tx_us = epoch_tx_us;
+              g_epoch_instant_us = T_epoch_instant_pkt;
+            }
+            /* After tracker update, compute global e_epoch for this packet */
+            int64_t eglob = (int64_t)g_epoch_instant_us - (int64_t)epoch_tx_us;
+            if (g_e_epoch_samples == 0) { g_e_epoch_min = eglob; g_e_epoch_max = eglob; }
+            if (eglob < g_e_epoch_min) g_e_epoch_min = eglob;
+            if (eglob > g_e_epoch_max) g_e_epoch_max = eglob;
+            g_e_epoch_sum += eglob; g_e_epoch_samples++;
           }
         }
 
@@ -731,15 +775,15 @@ int main(int argc, char** argv)
           }
           if (have_ts_tx) {
             int64_t inst = (int64_t)t_loc_us - (int64_t)cli.delta_us - (int64_t)A_us - (int64_t)cli.tau_us - (int64_t)TS_tx_us;
-            uint64_t T_epoch_instant = (inst < 0) ? 0ull : (uint64_t)inst;
+            uint64_t T_epoch_instant_pkt = (inst < 0) ? 0ull : (uint64_t)inst;
             int64_t real_du = (t_send_tx_us != 0) ? ((int64_t)t_loc_us - (int64_t)A_us - (int64_t)t_send_tx_us) : 0;
             int64_t e_d = (int64_t)cli.delta_us - real_du;
-            int64_t e_e = (have_epoch_tx) ? ((int64_t)T_epoch_instant - (int64_t)epoch_tx_us) : 0;
+            int64_t e_e = (have_epoch_tx) ? ((int64_t)T_epoch_instant_pkt - (int64_t)epoch_tx_us) : 0;
             struct epoch_stats* ES = &TXD[tx_id].es_overall;
-            if (ES->epoch_samples == 0) { ES->epoch_min = T_epoch_instant; ES->epoch_max = T_epoch_instant; }
-            if (T_epoch_instant < ES->epoch_min) ES->epoch_min = T_epoch_instant;
-            if (T_epoch_instant > ES->epoch_max) ES->epoch_max = T_epoch_instant;
-            ES->epoch_sum += T_epoch_instant; ES->epoch_samples++;
+            if (ES->epoch_samples == 0) { ES->epoch_min = T_epoch_instant_pkt; ES->epoch_max = T_epoch_instant_pkt; }
+            if (T_epoch_instant_pkt < ES->epoch_min) ES->epoch_min = T_epoch_instant_pkt;
+            if (T_epoch_instant_pkt > ES->epoch_max) ES->epoch_max = T_epoch_instant_pkt;
+            ES->epoch_sum += T_epoch_instant_pkt; ES->epoch_samples++;
             if (t_send_tx_us != 0) {
               if (ES->real_delta_samples == 0) { ES->real_delta_min = real_du; ES->real_delta_max = real_du; }
               if (real_du < ES->real_delta_min) ES->real_delta_min = real_du;
@@ -755,6 +799,16 @@ int main(int argc, char** argv)
               if (e_e < ES->e_epoch_min) ES->e_epoch_min = e_e;
               if (e_e > ES->e_epoch_max) ES->e_epoch_max = e_e;
               ES->e_epoch_sum += e_e; ES->e_epoch_samples++;
+              /* Also refine per-TX minimal epoch across ifaces for this epoch key */
+              if (!TXD[tx_id].have_cur_epoch || TXD[tx_id].cur_epoch_tx_us != epoch_tx_us) {
+                TXD[tx_id].have_cur_epoch = 1;
+                TXD[tx_id].cur_epoch_tx_us = epoch_tx_us;
+              TXD[tx_id].cur_epoch_instant_us = (uint64_t)T_epoch_instant_pkt;
+              } else {
+                if ((uint64_t)T_epoch_instant_pkt < TXD[tx_id].cur_epoch_instant_us) {
+                  TXD[tx_id].cur_epoch_instant_us = (uint64_t)T_epoch_instant_pkt;
+                }
+              }
             }
           }
         }
@@ -790,7 +844,6 @@ stats_tick:
     {
       uint64_t t1 = now_ms(); if (t1 - t0 >= (uint64_t)cli.stat_period_ms) {
         double avg_real_du = (real_delta_samples > 0) ? ((double)real_delta_sum / (double)real_delta_samples) : 0.0;
-        double avg_e_us    = (e_us_samples > 0) ? ((double)e_us_sum / (double)e_us_samples) : 0.0;
         double avg_e_delta = (e_delta_samples > 0) ? ((double)e_delta_sum / (double)e_delta_samples) : 0.0;
         fprintf(stderr, "[MX] dt=%llu ms | pkts=%llu | ifaces=%d\n",
                 (unsigned long long)(t1-t0), (unsigned long long)pkts, n_open);
@@ -802,7 +855,6 @@ stats_tick:
           struct epoch_stats* ES = &TXD[tX].es_overall;
           double avg_real  = (ES->real_delta_samples>0) ? ((double)ES->real_delta_sum/(double)ES->real_delta_samples) : 0.0;
           double avg_ed    = (ES->e_delta_samples>0) ? ((double)ES->e_delta_sum/(double)ES->e_delta_samples) : 0.0;
-          double avg_ee    = (ES->e_epoch_samples>0) ? ((double)ES->e_epoch_sum/(double)ES->e_epoch_samples) : 0.0;
           /* TX-level QLT: best chain avg across all IFs */
           int best_chain_avg = -127; int best_chain_valid = 0;
           for (int i2=0;i2<n_open;i2++) {
@@ -820,11 +872,10 @@ stats_tick:
           fprintf(stderr, "  [TX %03d] upkts=%llu lost=%u qlt=%.1f%% | RSSI min=%d avg=%.1f max=%d\n",
                   tX,(unsigned long long)TXD[tX].unique_pkts,(unsigned)TXD[tX].lost_glob,qlt_tx,
                   (int)TX[tX].rssi_min,avg_tx_rssi,(int)TX[tX].rssi_max);
-          /* Exclude epoch absolute values from stats output; keep timing error metrics only */
-          fprintf(stderr, "      real_delta avg=%.1f min=%lld max=%lld n=%llu\n      e_delta avg=%.1f min=%lld max=%lld n=%llu\n      e_epoch avg=%.1f min=%lld max=%lld n=%llu\n",
+          /* Exclude epoch absolute values from stats output; keep timing error metrics only (no e_epoch here) */
+          fprintf(stderr, "      real_delta avg=%.1f min=%lld max=%lld n=%llu\n      e_delta avg=%.1f min=%lld max=%lld n=%llu\n",
                   avg_real,(long long)ES->real_delta_min,(long long)ES->real_delta_max,(unsigned long long)ES->real_delta_samples,
-                  avg_ed,(long long)ES->e_delta_min,(long long)ES->e_delta_max,(unsigned long long)ES->e_delta_samples,
-                  avg_ee,(long long)ES->e_epoch_min,(long long)ES->e_epoch_max,(unsigned long long)ES->e_epoch_samples);
+                  avg_ed,(long long)ES->e_delta_min,(long long)ES->e_delta_max,(unsigned long long)ES->e_delta_samples);
           /* Then per-interface detail for this TX */
           for (int i2=0;i2<n_open;i2++) {
             struct if_detail* D = &TXD[tX].ifs[i2];
@@ -854,40 +905,32 @@ stats_tick:
             struct epoch_stats* EI = &D->es;
             double ar  = (EI->real_delta_samples>0)?((double)EI->real_delta_sum/(double)EI->real_delta_samples):0.0;
             double ad  = (EI->e_delta_samples>0)?((double)EI->e_delta_sum/(double)EI->e_delta_samples):0.0;
-            double ae  = (EI->e_epoch_samples>0)?((double)EI->e_epoch_sum/(double)EI->e_epoch_samples):0.0;
-            fprintf(stderr, "      real_delta avg=%.1f min=%lld max=%lld n=%llu\n      e_delta avg=%.1f min=%lld max=%lld n=%llu\n      e_epoch avg=%.1f min=%lld max=%lld n=%llu\n",
+            fprintf(stderr, "      real_delta avg=%.1f min=%lld max=%lld n=%llu\n      e_delta avg=%.1f min=%lld max=%lld n=%llu\n",
                     ar,(long long)EI->real_delta_min,(long long)EI->real_delta_max,(unsigned long long)EI->real_delta_samples,
-                    ad,(long long)EI->e_delta_min,(long long)EI->e_delta_max,(unsigned long long)EI->e_delta_samples,
-                    ae,(long long)EI->e_epoch_min,(long long)EI->e_epoch_max,(unsigned long long)EI->e_epoch_samples);
+                    ad,(long long)EI->e_delta_min,(long long)EI->e_delta_max,(unsigned long long)EI->e_delta_samples);
           }
         }
         fprintf(stderr, "      real_delta_us: avg=%.1f min=%lld max=%lld n=%llu\n",
                 avg_real_du, (long long)real_delta_min, (long long)real_delta_max,
                 (unsigned long long)real_delta_samples);
-        fprintf(stderr, "      e_us:    avg=%.1f min=%lld max=%lld n=%llu\n      e_delta: avg=%.1f min=%lld max=%lld n=%llu\n",
-                avg_e_us, (long long)e_us_min, (long long)e_us_max, (unsigned long long)e_us_samples,
+        fprintf(stderr, "      e_delta: avg=%.1f min=%lld max=%lld n=%llu\n",
                 avg_e_delta, (long long)e_delta_min, (long long)e_delta_max, (unsigned long long)e_delta_samples);
-        if (e_epoch_inst_samples > 0 || e_epoch_hat_samples > 0) {
-          double avg_e_epoch_inst = (e_epoch_inst_samples > 0) ? ((double)e_epoch_inst_sum / (double)e_epoch_inst_samples) : 0.0;
-          double avg_e_epoch_hat  = (e_epoch_hat_samples > 0)  ? ((double)e_epoch_hat_sum  / (double)e_epoch_hat_samples)  : 0.0;
-          fprintf(stderr, "      e_epoch_instant: avg=%.1f min=%lld max=%lld n=%llu\n      e_epoch_hat:     avg=%.1f min=%lld max=%lld n=%llu\n",
-                  avg_e_epoch_inst, (long long)e_epoch_inst_min, (long long)e_epoch_inst_max, (unsigned long long)e_epoch_inst_samples,
-                  avg_e_epoch_hat,  (long long)e_epoch_hat_min,  (long long)e_epoch_hat_max,  (unsigned long long)e_epoch_hat_samples);
-        }
+        /* Global e_epoch based on current tracker: e_epoch = g_epoch_instant_us - epoch_tx_us (aggregated) */
+        double avg_e_epoch_glob = (g_e_epoch_samples>0)?((double)g_e_epoch_sum/(double)g_e_epoch_samples):0.0;
+        fprintf(stderr, "      e_epoch(glob): avg=%.1f min=%lld max=%lld n=%llu\n",
+                avg_e_epoch_glob, (long long)g_e_epoch_min, (long long)g_e_epoch_max, (unsigned long long)g_e_epoch_samples);
         t0 = t1; pkts = 0;
         /* Reset per-period iface/tx stats */
         stats_reset_period(n_open);
         real_delta_sum = 0; real_delta_samples = 0;
-        e_us_sum = 0; e_us_samples = 0;
         e_delta_sum = 0; e_delta_samples = 0;
-        e_epoch_inst_sum = 0; e_epoch_inst_samples = 0;
-        e_epoch_hat_sum = 0;  e_epoch_hat_samples = 0;
+        g_e_epoch_sum = 0; g_e_epoch_samples = 0; g_e_epoch_min = 0; g_e_epoch_max = 0;
 
-        /* Publish EPOCH to subscribers (smoothed); send only T_epoch for now */
-        if (cs >= 0 && have_epoch) {
+        /* Publish current T_epoch_instant to subscribers */
+        if (cs >= 0 && g_have_epoch_inst) {
           struct wfbx_ctrl_epoch m; memset(&m, 0, sizeof(m));
           m.h.magic = WFBX_CTRL_MAGIC; m.h.ver = WFBX_CTRL_VER; m.h.type = WFBX_CTRL_EPOCH; m.h.seq = ++epoch_seq;
-          m.epoch_us = epoch_hat_us; m.epoch_len_us = 0; m.epoch_gi_us = 0; m.issued_us = mono_us_raw();
+          m.epoch_us = g_epoch_instant_us; m.epoch_len_us = 0; m.epoch_gi_us = 0; m.issued_us = mono_us_raw();
           for (int k=0;k<64;k++) if (subs[k].active) (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl);
         }
       }
