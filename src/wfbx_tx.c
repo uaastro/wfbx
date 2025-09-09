@@ -700,12 +700,16 @@ static int send_packet(pcap_t* ph,
     memcpy(frame + pos, payload, payload_len);
     pos += payload_len;
   }
-  /* Append only epoch_start_us (LE, 8 bytes); driver will append TX now_us (8B) */
+  /* Append mesh trailer: epoch (LE64) + ts_tx (LE64, 0) + ts_rx (LE64, 0).
+     Driver will overwrite ts_tx/ts_rx in-place. */
   {
-    uint64_t epoch_le = htole64(g_epoch_start_us);
-    if (pos + sizeof(epoch_le) > sizeof(frame)) return -1;
-    memcpy(frame + pos, &epoch_le, sizeof(epoch_le));
-    pos += sizeof(epoch_le);
+    struct wfbx_mesh_trailer tr;
+    memset(&tr, 0, sizeof(tr));
+    tr.epoch_us_le = htole64(g_epoch_start_us);
+    /* ts_tx_us_le and ts_rx_us_le stay zero as placeholders */
+    if (pos + sizeof(tr) > sizeof(frame)) return -1;
+    memcpy(frame + pos, &tr, sizeof(tr));
+    pos += sizeof(tr);
   }
 
   int ret = pcap_inject(ph, frame, (int)pos);

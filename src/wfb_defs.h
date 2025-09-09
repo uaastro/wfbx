@@ -190,24 +190,25 @@ struct wfb_radiotap_tx {
 
 /* ---- Mesh trailer (appended at end of payload) ------------------------- */
 /*
- * For testing/migration we carry BOTH fields:
- *  - ts_tx_us_le: 4-byte little-endian offset of frame within current superframe on TX (µs)
- *  - t0_ns_le   : 8-byte little-endian host CLOCK_MONOTONIC_RAW timestamp at TX (ns)
- * The trailer is placed as a packed struct at the very end of the payload.
+ * New driver-assisted trailer (24 bytes total), placed at the very end:
+ *  - epoch_us_le: 8B LE — TX-defined T_epoch (us, TX mono raw domain)
+ *  - ts_tx_us_le: 8B LE — TX send timestamp (us, filled by driver)
+ *  - ts_rx_us_le: 8B LE — RX receive timestamp (us, filled by driver)
+ * TX prepares this container with epoch populated and ts_tx/ts_rx set to 0.
  */
 #pragma pack(push,1)
 struct wfbx_mesh_trailer {
-  uint32_t ts_tx_us_le;   /* 4B, little-endian */
-  uint64_t t0_ns_le;      /* 8B, little-endian */
-  uint64_t epoch_us_le;   /* 8B, little-endian: TX-defined T_epoch (us, mono raw) */
+  uint64_t epoch_us_le;   /* 8B */
+  uint64_t ts_tx_us_le;   /* 8B */
+  uint64_t ts_rx_us_le;   /* 8B */
 };
 #pragma pack(pop)
 
 #define WFBX_TRAILER_BYTES ((unsigned)sizeof(struct wfbx_mesh_trailer))
 
-/* Legacy trailer sizes we may still encounter */
-#define WFBX_TRAILER12_BYTES 12u /* ts_tx(4) + t0_ns(8) */
-#define WFBX_TRAILER8_BYTES   8u /* t0_ns only */
+/* Legacy trailer sizes (unused in new flow) */
+/* #define WFBX_TRAILER12_BYTES 12u */
+/* #define WFBX_TRAILER8_BYTES   8u */
 
 /* ---- Control channel (UNIX DGRAM, abstract namespace) ------------------ */
 #define WFBX_CTRL_MAGIC 0x57584258u /* 'WXBX' */

@@ -649,38 +649,16 @@ int main(int argc, char** argv)
         last_link_id[tx_id]   = link_id;
         last_radio_port[tx_id]= radio_port;
 
-        /* --- Extract t0 tail (8 bytes ns) from the END of payload --- */
-        uint64_t t0_ns = 0;
-        int has_t0 = 0;
-        if (v.payload_len >= TS_TAIL_BYTES) {
-        uint64_t t0_le;
-        memcpy(&t0_le, v.payload + (v.payload_len - TS_TAIL_BYTES), TS_TAIL_BYTES);
-        t0_ns = le64toh(t0_le);
-        has_t0 = 1;
-        }
-
-        /* --- Per-packet Δt print (per interface) --- */
-        if (rs.has_tsft && has_t0) {
-            int64_t dt_us = (int64_t)rs.tsft_us - (int64_t)(t0_ns / 1000ull);
-            (void)dt_us;
-            /* iface_index = i ph[i]) */
-            //fprintf(stderr, "[DT] iface=%d seq=%u dt_us=%" PRId64 " tsft_us=%" PRIu64 " t0_ns=%" PRIu64 "\n",
-            //i, v.seq12, dt_us, (uint64_t)rs.tsft_us, (uint64_t)t0_ns);
-        }
-        else
-        {   
-           int64_t dt_us_host = (int64_t)(rx_ns_host/1000ull) - (int64_t)(t0_ns/1000ull);
-           (void)dt_us_host;
-           //fprintf(stderr, "[DT] iface=%d seq=%u dt_us=%" PRId64 " (HOST)\n", i, v.seq12, dt_us_host);
-        }
+        /* Determine mesh trailer size for trimming (from wfb_defs.h) */
+        size_t trailer_bytes = (v.payload_len >= WFBX_TRAILER_BYTES) ? (size_t)WFBX_TRAILER_BYTES : 0u;
         
         /* Global dedup by seq in the per-TX window. */
         int dup_global = seqwin_check_set(&SW[tx_id], v.seq12);
         const int should_forward = !dup_global; /* forward only once across all ifaces */
         if (should_forward) {
-          /* Payload bytes minus the 8-byte TS tail if present (to reflect UDP payload rate). */
+          /* Payload bytes minus the mesh trailer (reflect UDP payload rate). */
           size_t eff_len = v.payload_len;
-          if (has_t0 && eff_len >= TS_TAIL_BYTES) eff_len -= TS_TAIL_BYTES;
+          if (eff_len >= trailer_bytes) eff_len -= trailer_bytes;
           bytes_tx[tx_id] += (uint64_t)eff_len;
           pkts_tx[tx_id]  += 1;
           /* Mark that at least one valid packet has been seen globally. */
@@ -740,7 +718,7 @@ int main(int argc, char** argv)
         /* Forward only if not seen on another iface already */
         if (should_forward) {
           size_t out_len = v.payload_len;
-          if (has_t0 && out_len >= TS_TAIL_BYTES) out_len -= TS_TAIL_BYTES;
+          if (out_len >= trailer_bytes) out_len -= trailer_bytes;
           if (out_len > 0) {
             (void)sendto(us, v.payload, out_len, 0, (struct sockaddr*)&dst, sizeof(dst));
           }

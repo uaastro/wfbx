@@ -620,24 +620,27 @@ int main(int argc, char** argv)
         struct rt_stats rs; if (parse_radiotap_rx(pkt, hdr->caplen, &rs) != 0) continue;
         struct wfb_pkt_view v; if (extract_dot11(pkt, hdr->caplen, &rs, &v) != 0) continue;
 
-        /* Local RX software timestamp (end of delivery) */
-        uint64_t t_loc_us = mono_us_raw();
-
-        /* New trailer: last 8B = T_pkt_send_TX_us (driver), previous 8B = T_epoch_TX_us (app) */
+        /* Timestamps from driver-provided trailer: epoch_tx, ts_tx, ts_rx */
         uint32_t TS_tx_us = 0; int have_ts_tx = 0;
         uint64_t epoch_tx_us = 0; int have_epoch_tx = 0;
         uint64_t t_send_tx_us = 0;
+        uint64_t t_recv_rx_us = 0;
         size_t trailer_found = 0;
-        if (v.payload_len >= 16) {
-          uint64_t epoch_le, send_le;
-          memcpy(&epoch_le, v.payload + (v.payload_len - 16), 8);
-          memcpy(&send_le,  v.payload + (v.payload_len - 8),  8);
-          epoch_tx_us = le64toh(epoch_le); have_epoch_tx = 1;
-          t_send_tx_us = le64toh(send_le);
-          TS_tx_us = (uint32_t)(t_send_tx_us - epoch_tx_us);
+        if (v.payload_len >= WFBX_TRAILER_BYTES) {
+          uint64_t e_le, tx_le, rx_le;
+          memcpy(&e_le,  v.payload + (v.payload_len - WFBX_TRAILER_BYTES), 8);
+          memcpy(&tx_le, v.payload + (v.payload_len - WFBX_TRAILER_BYTES + 8), 8);
+          memcpy(&rx_le, v.payload + (v.payload_len - WFBX_TRAILER_BYTES + 16), 8);
+          epoch_tx_us  = le64toh(e_le);  have_epoch_tx = 1;
+          t_send_tx_us = le64toh(tx_le);
+          t_recv_rx_us = le64toh(rx_le);
+          if (t_send_tx_us >= epoch_tx_us) TS_tx_us = (uint32_t)(t_send_tx_us - epoch_tx_us);
+          else TS_tx_us = 0;
           have_ts_tx = 1;
-          trailer_found = 16;
+          trailer_found = WFBX_TRAILER_BYTES;
         }
+        /* Use driver RX timestamp if available, else fall back to local */
+        uint64_t t_loc_us = (t_recv_rx_us != 0) ? t_recv_rx_us : mono_us_raw();
 
         /* Compute airtime from actual PHY (HT) */
         uint32_t A_us = airtime_us_rx(v.payload_len, &rs);
