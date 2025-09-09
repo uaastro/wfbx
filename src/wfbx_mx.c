@@ -800,7 +800,6 @@ stats_tick:
           if (!tx_active) continue;
           double avg_tx_rssi = (TX[tX].rssi_samples>0) ? ((double)TX[tX].rssi_sum / (double)TX[tX].rssi_samples) : 0.0;
           struct epoch_stats* ES = &TXD[tX].es_overall;
-          double avg_epoch = (ES->epoch_samples>0) ? ((double)ES->epoch_sum/(double)ES->epoch_samples) : 0.0;
           double avg_real  = (ES->real_delta_samples>0) ? ((double)ES->real_delta_sum/(double)ES->real_delta_samples) : 0.0;
           double avg_ed    = (ES->e_delta_samples>0) ? ((double)ES->e_delta_sum/(double)ES->e_delta_samples) : 0.0;
           double avg_ee    = (ES->e_epoch_samples>0) ? ((double)ES->e_epoch_sum/(double)ES->e_epoch_samples) : 0.0;

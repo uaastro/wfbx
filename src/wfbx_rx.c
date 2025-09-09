@@ -625,10 +625,7 @@ int main(int argc, char** argv)
         const u_char* pkt = NULL;
         int rc = pcap_next_ex(ph[i], &hdr, &pkt);
         if (rc <= 0) break;
-        // rx time_stamp
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-        uint64_t rx_ns_host = (uint64_t)ts.tv_sec*1000000000ull + (uint64_t)ts.tv_nsec;
+        /* RX host timestamp no longer needed; driver provides ts_rx in trailer */
 
         struct rt_stats rs;
         if (parse_radiotap_rx(pkt, hdr->caplen, &rs) != 0) continue;

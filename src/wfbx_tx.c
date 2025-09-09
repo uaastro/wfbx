@@ -2,6 +2,19 @@
 // Preserves CLI and behavior of udp2wfb.c; uses shared defs from wfb_defs.h.
 // Build: gcc -O2 -Wall -o wfbx_tx wfbx_tx.c -lpcap
 
+/* Feature test macros: expose BSD/GNU/POSIX APIs (u_char/usleep/inet_aton) */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+#ifndef _BSD_SOURCE
+#define _BSD_SOURCE 1
+#endif
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
+/* Ensure BSD typedefs are defined before pcap includes */
+#include <sys/types.h>
 #include <pcap/pcap.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -17,7 +30,6 @@
 #include <time.h>
 #include <sys/un.h>
 #include <fcntl.h>
-#include <sys/types.h>
 #include <pthread.h>
 #include <math.h>
 
