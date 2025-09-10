@@ -689,7 +689,6 @@ int main(int argc, char** argv)
         uint32_t A_us = airtime_us_rx(v.payload_len, &rs);
 
         /* Identify TX/IF */
-        uint8_t tx_id = v.h ? v.h->addr2[5] : 0;
         struct if_detail* DID = &TXD[tx_id].ifs[i];
 
         /* Per-interface packet/radio stats + per-chain */
