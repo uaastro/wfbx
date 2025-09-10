@@ -445,8 +445,40 @@ static inline uint32_t airtime_us_rx(size_t mpdu_len, const struct rt_stats* rs)
 
 enum { TXF_ANY = 0, TXF_INCLUDE = 1, TXF_EXCLUDE = 2 };
 struct txid_filter { int mode; uint64_t map[4]; };
-static __attribute__((unused)) void txf_clear_all(struct txid_filter* f){ f->map[0]=f->map[1]=f->map[2]=f->map[3]=0; }
-static __attribute__((unused)) int txf_match(const struct txid_filter* f, uint8_t tx){ (void)tx; return f->mode==TXF_ANY ? 1 : 1; }
+static void txf_clear_all(struct txid_filter* f){ f->map[0]=f->map[1]=f->map[2]=f->map[3]=0; }
+static void txf_set(struct txid_filter* f, unsigned v) { if (v<=255) f->map[v>>6] |= (uint64_t)1ull << (v & 63); }
+static int txf_test(const struct txid_filter* f, unsigned v) { if (v>255) return 0; return (int)((f->map[v>>6] >> (v & 63)) & 1ull); }
+static int parse_uint_u8(const char* s, unsigned* out){ char* e=NULL; long v=strtol(s,&e,0); if (!s||s==e||v<0||v>255) return -1; *out=(unsigned)v; return 0; }
+/* Parse spec: "any" | "-1" | list | "!list", where list = "n[,m][,a-b]..." */
+static int txf_parse(struct txid_filter* f, const char* spec)
+{
+  txf_clear_all(f);
+  if (!spec || !*spec) { f->mode = TXF_INCLUDE; txf_set(f, 0); return 0; }
+  while (isspace((unsigned char)*spec)) ++spec;
+  if (strcmp(spec, "any")==0 || strcmp(spec, "-1")==0) { f->mode = TXF_ANY; return 0; }
+  int excl = 0; if (spec[0]=='!'){ excl=1; ++spec; }
+  f->mode = excl ? TXF_EXCLUDE : TXF_INCLUDE;
+  char buf[256]; strncpy(buf, spec, sizeof(buf)-1); buf[sizeof(buf)-1]=0;
+  char* save=NULL; char* tok=strtok_r(buf, ",", &save);
+  while (tok) {
+    while (isspace((unsigned char)*tok)) ++tok;
+    char* dash = strchr(tok, '-');
+    if (dash) {
+      *dash=0; unsigned a,b; if (parse_uint_u8(tok,&a)==0 && parse_uint_u8(dash+1,&b)==0) {
+        if (a<=b) { for (unsigned v=a; v<=b; ++v) txf_set(f,v); }
+        else      { for (unsigned v=b; v<=a; ++v) txf_set(f,v); }
+      }
+    } else { unsigned v; if (parse_uint_u8(tok,&v)==0) txf_set(f,v); }
+    tok = strtok_r(NULL, ",", &save);
+  }
+  return 0;
+}
+static int txf_match(const struct txid_filter* f, uint8_t tx)
+{
+  if (f->mode == TXF_ANY) return 1;
+  int present = txf_test(f, tx);
+  return (f->mode == TXF_INCLUDE) ? present : !present;
+}
 
 static volatile int g_run = 1; static void on_sigint(int){ g_run = 0; }
 
@@ -470,6 +502,7 @@ static void print_help(const char* prog)
          "Options:\n"
          "  --ip <addr>         UDP destination IP (default: %s)\n"
          "  --port <num>        UDP destination port (default: %d)\n"
+         "  --tx_id <list>      Filter by TX IDs: 'any' | '1,2,10-12' | '!3,7' (default: any)\n"
          "  --alpha <0..1>      EMA coefficient for T_epoch (default: 0.3)\n"
          "  --delta_us <num>    Stack latency in us (default: 1500)\n"
          "  --ctrl <@name>      Control UDS abstract address (default: @wfbx.mx)\n"
@@ -486,6 +519,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
   static struct option longopts[] = {
     {"ip",           required_argument, 0, 0},
     {"port",         required_argument, 0, 0},
+    {"tx_id",        required_argument, 0, 0},
     {"alpha",        required_argument, 0, 0},
     {"delta_us",     required_argument, 0, 0},
     {"ctrl",         required_argument, 0, 0},
@@ -499,6 +533,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
       const char* name = longopts[optidx].name; const char* val = optarg?optarg:"";
       if      (strcmp(name,"ip")==0)          cfg->ip = val;
       else if (strcmp(name,"port")==0)        cfg->port = atoi(val);
+      else if (strcmp(name,"tx_id")==0)       txf_parse(&cfg->txf, val);
       else if (strcmp(name,"alpha")==0)       cfg->alpha = atof(val);
       else if (strcmp(name,"delta_us")==0)    cfg->delta_us = atoi(val);
       else if (strcmp(name,"ctrl")==0)        cfg->ctrl_addr = val;
@@ -624,6 +659,9 @@ int main(int argc, char** argv)
         struct pcap_pkthdr* hdr = NULL; const u_char* pkt = NULL; int rc = pcap_next_ex(ph[i], &hdr, &pkt); if (rc <= 0) break;
         struct rt_stats rs; if (parse_radiotap_rx(pkt, hdr->caplen, &rs) != 0) continue;
         struct wfb_pkt_view v; if (extract_dot11(pkt, hdr->caplen, &rs, &v) != 0) continue;
+        /* TX-ID filter: use addr2[5] */
+        uint8_t tx_id = v.h ? v.h->addr2[5] : 0;
+        if (!txf_match(&cli.txf, tx_id)) continue;
 
         /* Timestamps from driver-provided trailer: epoch_tx, ts_tx, ts_rx */
         uint32_t TS_tx_us = 0; int have_ts_tx = 0;

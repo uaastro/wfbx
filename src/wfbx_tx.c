@@ -179,6 +179,8 @@ static void print_help(const char* prog)
     "  --send_gi <us>        Inter-send pacing guard [%u]\n"
     "  --prewake_q <n>       Divide long sleeps into n slices [%d]\n"
     "  --prewake_min <us>    Minimum slice length (us) [%u]\n"
+    "  --stat_period <ms>    Stats period in ms [%d]\n"
+    "  --epoch_sync <on|off> Enable/disable MX epoch sync [%s]\n"
     "  --help                Show this help and exit\n"
     "\nEnvironment:\n"
     "  WFBX_CTRL=1           Enable control channel (default off)\n"
@@ -202,7 +204,9 @@ static void print_help(const char* prog)
     250u,
     200u,
     1,
-    1000u
+    1000u,
+    1000,
+    "on"
   );
 }
 
@@ -239,7 +243,7 @@ static struct sockaddr_un g_mx_addr; static socklen_t g_mx_addr_len;
 static char g_tx_name[108] = {0};
 static char g_mx_name[108] = {0};
 static uint32_t g_ctrl_seq = 0;
-static int g_ctrl_enabled = 0; /* control sync disabled by default */
+static int g_ctrl_enabled = 1; /* control sync enabled by default (can be toggled by CLI) */
 /* Pending epoch adjustment (applied at epoch boundary) */
 static uint64_t g_pending_epoch_us = 0;
 static int g_pending_epoch_valid = 0;
@@ -499,8 +503,13 @@ static inline void apply_pending_epoch_if_any(void)
 {
   if (!g_ctrl_enabled) return;
   uint64_t pending = 0; int have = 0;
+  /* Apply only when we are NOT inside the active TX slot. */
+  uint64_t now = mono_us_raw();
   pthread_mutex_lock(&g_epoch.mtx);
-  if (g_pending_epoch_valid) { pending = g_pending_epoch_us; have = 1; g_pending_epoch_valid = 0; }
+  uint64_t T_open  = g_epoch.cur_us + (uint64_t)g_slot_start_us;
+  uint64_t T_close = T_open + (uint64_t)g_slot_len_us - (uint64_t)g_gi_tx_us;
+  int in_slot = (now >= T_open) && (now < T_close);
+  if (!in_slot && g_pending_epoch_valid) { pending = g_pending_epoch_us; have = 1; g_pending_epoch_valid = 0; }
   pthread_mutex_unlock(&g_epoch.mtx);
   if (have) epoch_adjust_from_mx(pending);
 }
@@ -521,6 +530,9 @@ static void sleep_until_boundary_sliced(int target_kind)
     nanosleep(&ts, NULL);
     /* Maintain epoch continuity and roll over per-slot stats on boundary */
     epoch_rollover_if_needed();
+    /* If we had a pending epoch update from MX (arrived during active slot),
+       and we are now outside the slot, apply it immediately (don't wait boundary). */
+    apply_pending_epoch_if_any();
   }
 }
 
@@ -873,6 +885,8 @@ int main(int argc, char** argv) {
     {"send_gi",    required_argument, 0, 0},
     {"prewake_q",  required_argument, 0, 0},
     {"prewake_min",required_argument, 0, 0},
+    {"stat_period",required_argument, 0, 0},
+    {"epoch_sync", required_argument, 0, 0},
     {"help",       no_argument,       0, 0},
     {0,0,0,0}
   };
@@ -915,15 +929,21 @@ int main(int argc, char** argv) {
       else if (strcmp(name,"send_gi")==0)     g_send_guard_us= (uint32_t)atoi(val);
       else if (strcmp(name,"prewake_q")==0)   { g_prewake_quanta = atoi(val); if (g_prewake_quanta < 1) g_prewake_quanta = 1; }
       else if (strcmp(name,"prewake_min")==0) { g_prewake_min_us = (uint32_t)atoi(val); if (g_prewake_min_us < 100) g_prewake_min_us = 100; }
+      else if (strcmp(name,"stat_period")==0) { int v=atoi(val); if (v>0 && v<=60000) g_stat_period_ms = v; }
+      else if (strcmp(name,"epoch_sync")==0)  { if (val && (*val=='0' || strcasecmp(val,"off")==0)) g_ctrl_enabled = 0; else g_ctrl_enabled = 1; }
       else if (strcmp(name,"help")==0)        { print_help(argv[0]); return 0; }
     }
   }
 
-  /* Optional env to enable control sync: WFBX_CTRL=1 */
+  /* Optional env to enable/disable control sync: WFBX_CTRL=0/1 (CLI has priority) */
   const char* ctrl_env = getenv("WFBX_CTRL");
-  if (ctrl_env && atoi(ctrl_env) != 0) g_ctrl_enabled = 1;
+  if (ctrl_env) {
+    int v = atoi(ctrl_env);
+    if (v == 0) g_ctrl_enabled = 0;
+    else if (v != 0) g_ctrl_enabled = 1;
+  }
 
-  /* Stats period (env) */
+  /* Stats period (env) if CLI not set; CLI already applied above */
   const char* sp = getenv("WFBX_STAT_MS");
   if (sp) { int v = atoi(sp); if (v > 0 && v <= 60000) g_stat_period_ms = v; }
 
