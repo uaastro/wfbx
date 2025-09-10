@@ -870,7 +870,7 @@ stats_tick:
           /* TX-level QLT: based on deduped stream: unique / (unique + lost_glob) */
           uint64_t exp_tx_total = TXD[tX].unique_pkts + (uint64_t)TXD[tX].lost_glob;
           double qlt_tx = (exp_tx_total>0) ? (100.0 * (double)TXD[tX].unique_pkts / (double)exp_tx_total) : 0.0;
-          fprintf(stderr, "  [TX %03d] upkts=%llu lost=%u qlt=%.1f%% | RSSI min=%d avg=%.1f max=%d\n",
+          fprintf(stderr, "\n  [TX %03d] upkts=%llu lost=%u qlt=%.1f%% | RSSI min=%d avg=%.1f max=%d\n",
                   tX,(unsigned long long)TXD[tX].unique_pkts,(unsigned)TXD[tX].lost_glob,qlt_tx,
                   (int)TX[tX].rssi_min,avg_tx_rssi,(int)TX[tX].rssi_max);
           /* Exclude epoch absolute values from stats output; keep timing error metrics only (no e_epoch here) */
@@ -892,7 +892,7 @@ stats_tick:
                 if (!best_valid || avgc > best_chain_avg_if) { best_chain_avg_if = avgc; best_chain_id = AS->ant_id; best_valid=1; }
               }
             }
-            fprintf(stderr, "    [IF %d] pkts=%llu lost=%u qlt=%.1f%% | bestChain=%s%d(avg %d dBm)\n",
+            fprintf(stderr, "\n    [IF %d] pkts=%llu lost=%u qlt=%.1f%% | bestChain=%s%d(avg %d dBm)\n",
                     i2,(unsigned long long)D->pkts,(unsigned)D->lost,qlt,
                     (best_valid?"ANT":"n/a "), best_valid?(int)best_chain_id:0, best_valid?best_chain_avg_if:0);
             /* Per-antenna stats */
@@ -918,7 +918,7 @@ stats_tick:
                 avg_e_delta, (long long)e_delta_min, (long long)e_delta_max, (unsigned long long)e_delta_samples);
         /* Global e_epoch based on current tracker: e_epoch = g_epoch_instant_us - epoch_tx_us (aggregated) */
         double avg_e_epoch_glob = (g_e_epoch_samples>0)?((double)g_e_epoch_sum/(double)g_e_epoch_samples):0.0;
-        fprintf(stderr, "      e_epoch(glob): avg=%.1f min=%lld max=%lld n=%llu\n",
+        fprintf(stderr, "\n      e_epoch(glob): avg=%.1f min=%lld max=%lld n=%llu\n",
                 avg_e_epoch_glob, (long long)g_e_epoch_min, (long long)g_e_epoch_max, (unsigned long long)g_e_epoch_samples);
         /* Global e_epoch_last: last value before switching epoch key */
         double avg_e_epoch_last = (g_e_epoch_last_samples>0)?((double)g_e_epoch_last_sum/(double)g_e_epoch_last_samples):0.0;
