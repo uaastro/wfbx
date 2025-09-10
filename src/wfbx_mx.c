@@ -91,6 +91,11 @@ static int64_t  g_e_epoch_sum = 0;
 static int64_t  g_e_epoch_min = INT64_C(0);
 static int64_t  g_e_epoch_max = INT64_C(0);
 static uint64_t g_e_epoch_samples = 0;
+/* Global e_epoch_last: captured at the moment of switching (prev key's last e_epoch) */
+static int64_t  g_e_epoch_last_sum = 0;
+static int64_t  g_e_epoch_last_min = INT64_C(0);
+static int64_t  g_e_epoch_last_max = INT64_C(0);
+static uint64_t g_e_epoch_last_samples = 0;
 
 /* ---- Global dedup per TX (12-bit seq) and stats containers ---- */
 struct seq_window {
@@ -723,6 +728,13 @@ int main(int argc, char** argv)
             } else if (g_cur_tx_id == tx_id && g_cur_epoch_tx_us == epoch_tx_us) {
               if (T_epoch_instant_pkt < g_epoch_instant_us) g_epoch_instant_us = T_epoch_instant_pkt;
             } else {
+              /* Switching key: capture e_epoch_last for previous key before updating */
+              int64_t last = (int64_t)g_epoch_instant_us - (int64_t)g_cur_epoch_tx_us;
+              if (g_e_epoch_last_samples == 0) { g_e_epoch_last_min = last; g_e_epoch_last_max = last; }
+              if (last < g_e_epoch_last_min) g_e_epoch_last_min = last;
+              if (last > g_e_epoch_last_max) g_e_epoch_last_max = last;
+              g_e_epoch_last_sum += last; g_e_epoch_last_samples++;
+              /* Now switch current key and seed with this packet */
               g_cur_tx_id = tx_id;
               g_cur_epoch_tx_us = epoch_tx_us;
               g_epoch_instant_us = T_epoch_instant_pkt;
@@ -908,12 +920,17 @@ stats_tick:
         double avg_e_epoch_glob = (g_e_epoch_samples>0)?((double)g_e_epoch_sum/(double)g_e_epoch_samples):0.0;
         fprintf(stderr, "      e_epoch(glob): avg=%.1f min=%lld max=%lld n=%llu\n",
                 avg_e_epoch_glob, (long long)g_e_epoch_min, (long long)g_e_epoch_max, (unsigned long long)g_e_epoch_samples);
+        /* Global e_epoch_last: last value before switching epoch key */
+        double avg_e_epoch_last = (g_e_epoch_last_samples>0)?((double)g_e_epoch_last_sum/(double)g_e_epoch_last_samples):0.0;
+        fprintf(stderr, "      e_epoch_last:  avg=%.1f min=%lld max=%lld n=%llu\n",
+                avg_e_epoch_last, (long long)g_e_epoch_last_min, (long long)g_e_epoch_last_max, (unsigned long long)g_e_epoch_last_samples);
         t0 = t1; pkts = 0;
         /* Reset per-period iface/tx stats */
         stats_reset_period(n_open);
         real_delta_sum = 0; real_delta_samples = 0;
         e_delta_sum = 0; e_delta_samples = 0;
         g_e_epoch_sum = 0; g_e_epoch_samples = 0; g_e_epoch_min = 0; g_e_epoch_max = 0;
+        g_e_epoch_last_sum = 0; g_e_epoch_last_samples = 0; g_e_epoch_last_min = 0; g_e_epoch_last_max = 0;
 
         /* Publish current T_epoch_instant to subscribers */
         if (cs >= 0 && g_have_epoch_inst) {
