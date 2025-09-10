@@ -477,6 +477,8 @@ static void epoch_adjust_from_mx(uint64_t epoch_mx_us)
 }
 
 /* ---- Helpers for pre-wake sliced sleep to boundary ---- */
+/* Forward declaration: used from sliced sleep helper */
+static inline void epoch_rollover_if_needed(void);
 static inline uint64_t epoch_get_T_open(void)
 {
   uint64_t T_open;
