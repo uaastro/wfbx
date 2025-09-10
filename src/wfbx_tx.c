@@ -517,9 +517,8 @@ static void sleep_until_boundary_sliced(int target_kind)
     if (slice > remain) slice = remain;
     struct timespec ts = { slice/1000000ull, (long)((slice%1000000ull)*1000ull) };
     nanosleep(&ts, NULL);
-    /* Maintain epoch continuity and apply pending adjustment at boundary crossings */
-    uint64_t now2 = mono_us_raw();
-    if (epoch_switch_if_needed(now2)) apply_pending_epoch_if_any();
+    /* Maintain epoch continuity and roll over per-slot stats on boundary */
+    epoch_rollover_if_needed();
   }
 }
 
@@ -630,6 +629,32 @@ static void* thr_ctrl(void* arg)
   return NULL;
 }
 
+static inline void epoch_rollover_if_needed(void)
+{
+  uint64_t now = mono_us_raw();
+  int advanced = epoch_switch_if_needed(now);
+  if (advanced) {
+    /* At epoch boundary: record buffer-left once per slot if not yet sampled */
+    if (!g_buf_left_sampled_this_slot) {
+      uint64_t buf_left = dl_size(&g_buf);
+      g_buf_left_sum += buf_left;
+      if (g_buf_left_min == UINT64_MAX || buf_left < g_buf_left_min) g_buf_left_min = buf_left;
+      if (buf_left > g_buf_left_max) g_buf_left_max = buf_left;
+      g_buf_left_cnt++;
+    }
+    g_buf_left_sampled_this_slot = 0; /* new slot begins */
+    /* window boundary: fold per-window sent into period slot stats and reset window counters */
+    g_slot_sent_sum += g_sent_in_window;
+    if (g_slot_sent_min == UINT64_MAX || g_sent_in_window < g_slot_sent_min) g_slot_sent_min = g_sent_in_window;
+    if (g_sent_in_window > g_slot_sent_max) g_slot_sent_max = g_sent_in_window;
+    g_slot_count++;
+    g_sent_in_window = 0;
+    g_drop_in_window = 0;
+    /* Apply pending epoch correction (if any) exactly at boundary */
+    apply_pending_epoch_if_any();
+  }
+}
+
 static void* thr_sched(void* arg)
 {
   (void)arg;
@@ -679,35 +704,7 @@ static void* thr_sched(void* arg)
       /* reset period-scoped overflow counter */
       g_buf_drop_period = 0;
     }
-    int advanced = epoch_switch_if_needed(now);
-    if (advanced) {
-      /* At epoch boundary: record buffer-left once per slot if not yet sampled */
-      if (!g_buf_left_sampled_this_slot) {
-        uint64_t buf_left = dl_size(&g_buf);
-        g_buf_left_sum += buf_left;
-        if (g_buf_left_min == UINT64_MAX || buf_left < g_buf_left_min) g_buf_left_min = buf_left;
-        if (buf_left > g_buf_left_max) g_buf_left_max = buf_left;
-        g_buf_left_cnt++;
-      }
-      g_buf_left_sampled_this_slot = 0; /* new slot begins */
-      /* window boundary: fold per-window sent into period slot stats and reset window counters */
-      g_slot_sent_sum += g_sent_in_window;
-      if (g_slot_sent_min == UINT64_MAX || g_sent_in_window < g_slot_sent_min) g_slot_sent_min = g_sent_in_window;
-      if (g_sent_in_window > g_slot_sent_max) g_slot_sent_max = g_sent_in_window;
-      g_slot_count++;
-      g_sent_in_window = 0;
-      g_drop_in_window = 0;
-      /* Apply pending epoch correction (if any) exactly at boundary */
-      if (g_ctrl_enabled) {
-        uint64_t pending = 0; int have = 0;
-        pthread_mutex_lock(&g_epoch.mtx);
-        if (g_pending_epoch_valid) { pending = g_pending_epoch_us; have = 1; g_pending_epoch_valid = 0; }
-        pthread_mutex_unlock(&g_epoch.mtx);
-        if (have) {
-          epoch_adjust_from_mx(pending);
-        }
-      }
-    }
+    epoch_rollover_if_needed();
 
     pthread_mutex_lock(&g_epoch.mtx);
     uint64_t T_open  = g_epoch.cur_us + (uint64_t)g_slot_start_us;
@@ -748,7 +745,8 @@ static void* thr_sched(void* arg)
     T_next  = g_epoch.next_us;
     pthread_mutex_unlock(&g_epoch.mtx);
 
-    uint32_t A_us = airtime_us_tx(p.len + (size_t)WFBX_TRAILER_BYTES, g_mcs_idx, g_gi_short, g_bw40, g_stbc);
+    /* Compute airtime using TX payload + mesh trailer (legacy behavior) */
+    uint32_t A_us = airtime_us_tx((size_t)p.len + (size_t)WFBX_TRAILER_BYTES, g_mcs_idx, g_gi_short, g_bw40, g_stbc);
     now = mono_us_raw();
     if (t_next_send == 0) t_next_send = (now > T_open) ? now : T_open;
     if (now < t_next_send) {
