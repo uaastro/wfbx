@@ -240,6 +240,9 @@ static char g_tx_name[108] = {0};
 static char g_mx_name[108] = {0};
 static uint32_t g_ctrl_seq = 0;
 static int g_ctrl_enabled = 0; /* control sync disabled by default */
+/* Pending epoch adjustment (applied at epoch boundary) */
+static uint64_t g_pending_epoch_us = 0;
+static int g_pending_epoch_valid = 0;
 
 static void uds_build_addr(const char* name_in, struct sockaddr_un* sa, socklen_t* sl_out, char* out_norm, size_t out_sz)
 {
@@ -556,8 +559,6 @@ static uint16_t g_seq = 0;
 static int g_mcs_idx = 0, g_gi_short = 1, g_bw40 = 0, g_ldpc = 1, g_stbc = 1;
 static uint8_t g_group_id = 0, g_tx_id = 0, g_link_id = 0, g_radio_port = 0;
 /* Pending epoch adjustment (apply at boundary if set during active slot) */
-static uint64_t g_pending_epoch_us = 0;
-static int g_pending_epoch_valid = 0;
 
 /* Stats */
 static int g_stat_period_ms = 1000;
