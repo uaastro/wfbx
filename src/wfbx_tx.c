@@ -177,6 +177,8 @@ static void print_help(const char* prog)
     "  --d_max <km>          Max distance; adds tau guard [%.1f]\n"
     "  --eps_us <us>         Scheduler margin epsilon [%u]\n"
     "  --send_gi <us>        Inter-send pacing guard [%u]\n"
+    "  --prewake_q <n>       Divide long sleeps into n slices [%d]\n"
+    "  --prewake_min <us>    Minimum slice length (us) [%u]\n"
     "  --help                Show this help and exit\n"
     "\nEnvironment:\n"
     "  WFBX_CTRL=1           Enable control channel (default off)\n"
@@ -198,7 +200,9 @@ static void print_help(const char* prog)
     1500u,
     0.0,
     250u,
-    200u
+    200u,
+    1,
+    1000u
   );
 }
 
@@ -224,6 +228,9 @@ static uint32_t g_tau_max_us    = 0;
 static uint32_t g_eps_us        = 250;
 static double   g_d_max_km      = 0.0; /* CLI: max distance; drives g_tau_max_us */
 static uint32_t g_send_guard_us = 200; /* pacing guard between packets (us) */
+/* Pre-wake slicing to refine epoch boundaries during long sleeps */
+static int      g_prewake_quanta  = 1;     /* number of slices for long sleeps (>=1) */
+static uint32_t g_prewake_min_us  = 1000;  /* minimum sleep slice (us) */
 
 /* Control socket (UDS DGRAM) */
 static int g_cs = -1;
@@ -466,6 +473,53 @@ static void epoch_adjust_from_mx(uint64_t epoch_mx_us)
   pthread_mutex_unlock(&g_epoch.mtx);
 }
 
+/* ---- Helpers for pre-wake sliced sleep to boundary ---- */
+static inline uint64_t epoch_get_T_open(void)
+{
+  uint64_t T_open;
+  pthread_mutex_lock(&g_epoch.mtx);
+  T_open = g_epoch.cur_us + (uint64_t)g_slot_start_us;
+  pthread_mutex_unlock(&g_epoch.mtx);
+  return T_open;
+}
+static inline uint64_t epoch_get_T_next(void)
+{
+  uint64_t T_next;
+  pthread_mutex_lock(&g_epoch.mtx);
+  T_next = g_epoch.next_us;
+  pthread_mutex_unlock(&g_epoch.mtx);
+  return T_next;
+}
+static inline void apply_pending_epoch_if_any(void)
+{
+  if (!g_ctrl_enabled) return;
+  uint64_t pending = 0; int have = 0;
+  pthread_mutex_lock(&g_epoch.mtx);
+  if (g_pending_epoch_valid) { pending = g_pending_epoch_us; have = 1; g_pending_epoch_valid = 0; }
+  pthread_mutex_unlock(&g_epoch.mtx);
+  if (have) epoch_adjust_from_mx(pending);
+}
+/* target_kind: 0 → T_open, 1 → T_next */
+static void sleep_until_boundary_sliced(int target_kind)
+{
+  int qs = (g_prewake_quanta < 1) ? 1 : g_prewake_quanta;
+  for (int i=0; i<qs && g_run; ++i) {
+    uint64_t target = (target_kind == 0) ? epoch_get_T_open() : epoch_get_T_next();
+    uint64_t now = mono_us_raw();
+    if (now >= target) break;
+    int slices_left = qs - i;
+    uint64_t remain = target - now;
+    uint64_t slice = remain / (uint64_t)slices_left;
+    if (slice < (uint64_t)g_prewake_min_us) slice = (uint64_t)g_prewake_min_us;
+    if (slice > remain) slice = remain;
+    struct timespec ts = { slice/1000000ull, (long)((slice%1000000ull)*1000ull) };
+    nanosleep(&ts, NULL);
+    /* Maintain epoch continuity and apply pending adjustment at boundary crossings */
+    uint64_t now2 = mono_us_raw();
+    if (epoch_switch_if_needed(now2)) apply_pending_epoch_if_any();
+  }
+}
+
 /* ---- TX airtime estimation (HT only) ---- */
 static const double ht_mbps_tx[2][2][8] = {
   { {6.5, 13.0, 19.5, 26.0, 39.0, 52.0, 58.5, 65.0}, {7.2, 14.4, 21.7, 28.9, 43.3, 57.8, 65.0, 72.2} },
@@ -663,8 +717,9 @@ static void* thr_sched(void* arg)
     now = mono_us_raw();
     static uint64_t t_next_send = 0;
     if (now < T_open) {
-      uint64_t dt = T_open - now; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL);
-      t_next_send = T_open;
+      /* Pre-wake sliced sleep until T_open to refine epoch */
+      sleep_until_boundary_sliced(0);
+      t_next_send = epoch_get_T_open();
       continue;
     }
     if (now > T_close) {
@@ -677,7 +732,8 @@ static void* thr_sched(void* arg)
         g_buf_left_cnt++;
         g_buf_left_sampled_this_slot = 1;
       }
-      uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL);
+      /* Pre-wake sliced sleep until next superframe */
+      sleep_until_boundary_sliced(1);
       t_next_send = 0;
       continue;
     }
@@ -710,7 +766,8 @@ static void* thr_sched(void* arg)
       }
       /* return packet and wait next superframe */
       (void)dl_push_front(&g_buf, &p);
-      uint64_t dt = (T_next > now) ? (T_next - now) : 1000; struct timespec ts={ dt/1000000ull, (long)((dt%1000000ull)*1000ull)}; nanosleep(&ts, NULL);
+      /* Sleep sliced until next superframe to avoid busy loop and refine epoch */
+      sleep_until_boundary_sliced(1);
       t_next_send = 0;
       continue;
     }
@@ -813,6 +870,8 @@ int main(int argc, char** argv) {
     {"d_max",      required_argument, 0, 0},
     {"eps_us",     required_argument, 0, 0},
     {"send_gi",    required_argument, 0, 0},
+    {"prewake_q",  required_argument, 0, 0},
+    {"prewake_min",required_argument, 0, 0},
     {"help",       no_argument,       0, 0},
     {0,0,0,0}
   };
@@ -853,6 +912,8 @@ int main(int argc, char** argv) {
       else if (strcmp(name,"d_max")==0)       g_d_max_km     = atof(val);
       else if (strcmp(name,"eps_us")==0)      g_eps_us       = (uint32_t)atoi(val);
       else if (strcmp(name,"send_gi")==0)     g_send_guard_us= (uint32_t)atoi(val);
+      else if (strcmp(name,"prewake_q")==0)   { g_prewake_quanta = atoi(val); if (g_prewake_quanta < 1) g_prewake_quanta = 1; }
+      else if (strcmp(name,"prewake_min")==0) { g_prewake_min_us = (uint32_t)atoi(val); if (g_prewake_min_us < 100) g_prewake_min_us = 100; }
       else if (strcmp(name,"help")==0)        { print_help(argv[0]); return 0; }
     }
   }
