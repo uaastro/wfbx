@@ -545,9 +545,6 @@ int main(int argc, char** argv)
   /* Init dedup windows per TX and reset per-period stats */
   for (int t=0;t<MAX_TX_IDS;++t) seqwin_init(&SWG[t]);
   stats_reset_period(n_open);
-  /* Epoch estimation state */
-  int have_epoch = 0;
-  uint64_t epoch_hat_us = 0; /* T̂_epoch */
   /* Real delta_us statistics */
   int64_t real_delta_sum = 0;
   int64_t real_delta_min = INT64_C(0);
@@ -559,15 +556,7 @@ int main(int argc, char** argv)
   int64_t e_delta_min = INT64_C(0);
   int64_t e_delta_max = INT64_C(0);
   uint64_t e_delta_samples = 0;
-  /* Epoch vs TX-epoch statistics */
-  int64_t e_epoch_inst_sum = 0;
-  int64_t e_epoch_inst_min = INT64_C(0);
-  int64_t e_epoch_inst_max = INT64_C(0);
-  uint64_t e_epoch_inst_samples = 0;
-  int64_t e_epoch_hat_sum = 0;
-  int64_t e_epoch_hat_min = INT64_C(0);
-  int64_t e_epoch_hat_max = INT64_C(0);
-  uint64_t e_epoch_hat_samples = 0;
+  /* Epoch vs TX-epoch detailed stats removed; use global e_epoch only */
 
   /* Control socket setup (abstract UDS) */
   int cs = -1; struct sockaddr_un mx_sa; socklen_t mx_sl = 0;
