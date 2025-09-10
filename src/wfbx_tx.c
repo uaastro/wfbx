@@ -151,6 +151,57 @@ static int send_packet(pcap_t* ph,
                        uint8_t mcs_idx, int gi_short, int bw40, int ldpc, int stbc,
                        uint8_t group_id, uint8_t tx_id, uint8_t link_id, uint8_t radio_port);
 
+static void print_help(const char* prog)
+{
+  printf(
+    "Usage: sudo %s [options] <wlan_iface>\n"
+    "\nOptions (defaults in brackets):\n"
+    "  --ip <addr>           UDP bind IP [%s]\n"
+    "  --port <num>          UDP bind port [%d]\n"
+    "  --mcs_idx <n>         HT MCS index (0..31) [%d]\n"
+    "  --gi <short|long>     Guard interval [%s]\n"
+    "  --bw <20|40>          Channel bandwidth (MHz) [%s]\n"
+    "  --ldpc <0|1>          Use LDPC FEC [%d]\n"
+    "  --stbc <0..3>         STBC streams [%d]\n"
+    "  --group_id <id>       Group ID (addr1[5]) [%d]\n"
+    "  --tx_id <id>          Transmitter ID (addr2[5]) [%d]\n"
+    "  --link_id <id>        Link ID (addr3[4]) [%d]\n"
+    "  --radio_port <id>     Radio Port (addr3[5]) [%d]\n"
+    "  --mx <@name>          Control UDS abstract addr [%s]\n"
+    "  --epoch_len <us>      Superframe length [%u]\n"
+    "  --epoch_gi <us>       Inter-superframe guard (pre-prop) [%u]\n"
+    "  --slot_start <us>     TX slot start offset [%u]\n"
+    "  --slot_len <us>       TX slot length [%u]\n"
+    "  --gi_tx <us>          TX slot tail guard (pre-prop) [%u]\n"
+    "  --delta_us <us>       Stack latency delta [%u]\n"
+    "  --d_max <km>          Max distance; adds tau guard [%.1f]\n"
+    "  --eps_us <us>         Scheduler margin epsilon [%u]\n"
+    "  --send_gi <us>        Inter-send pacing guard [%u]\n"
+    "  --help                Show this help and exit\n"
+    "\nEnvironment:\n"
+    "  WFBX_CTRL=1           Enable control channel (default off)\n"
+    "  WFBX_STAT_MS=<ms>     Stats period in ms [1000]\n",
+    prog,
+    "0.0.0.0", 5600,
+    0,
+    "short",
+    "20",
+    1,
+    1,
+    0, 0, 0, 0,
+    "@wfbx.mx",
+    50000u,
+    400u,
+    0u,
+    50000u,
+    400u,
+    1500u,
+    0.0,
+    250u,
+    200u
+  );
+}
+
 static uint64_t mono_ns_raw(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
@@ -762,6 +813,7 @@ int main(int argc, char** argv) {
     {"d_max",      required_argument, 0, 0},
     {"eps_us",     required_argument, 0, 0},
     {"send_gi",    required_argument, 0, 0},
+    {"help",       no_argument,       0, 0},
     {0,0,0,0}
   };
 
@@ -801,6 +853,7 @@ int main(int argc, char** argv) {
       else if (strcmp(name,"d_max")==0)       g_d_max_km     = atof(val);
       else if (strcmp(name,"eps_us")==0)      g_eps_us       = (uint32_t)atoi(val);
       else if (strcmp(name,"send_gi")==0)     g_send_guard_us= (uint32_t)atoi(val);
+      else if (strcmp(name,"help")==0)        { print_help(argv[0]); return 0; }
     }
   }
 
