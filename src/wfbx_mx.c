@@ -911,7 +911,7 @@ stats_tick:
                     ad,(long long)EI->e_delta_min,(long long)EI->e_delta_max,(unsigned long long)EI->e_delta_samples);
           }
         }
-        fprintf(stderr, "      real_delta_us: avg=%.1f min=%lld max=%lld n=%llu\n",
+        fprintf(stderr, "\n      real_delta_us: avg=%.1f min=%lld max=%lld n=%llu\n",
                 avg_real_du, (long long)real_delta_min, (long long)real_delta_max,
                 (unsigned long long)real_delta_samples);
         fprintf(stderr, "      e_delta: avg=%.1f min=%lld max=%lld n=%llu\n",
