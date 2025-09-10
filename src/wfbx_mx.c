@@ -846,7 +846,7 @@ stats_tick:
       uint64_t t1 = now_ms(); if (t1 - t0 >= (uint64_t)cli.stat_period_ms) {
         double avg_real_du = (real_delta_samples > 0) ? ((double)real_delta_sum / (double)real_delta_samples) : 0.0;
         double avg_e_delta = (e_delta_samples > 0) ? ((double)e_delta_sum / (double)e_delta_samples) : 0.0;
-        fprintf(stderr, "[MX] dt=%llu ms | pkts=%llu | ifaces=%d\n",
+        fprintf(stderr, "\n[MX] dt=%llu ms | pkts=%llu | ifaces=%d\n",
                 (unsigned long long)(t1-t0), (unsigned long long)pkts, n_open);
         /* Per-TX blocks first; inside each TX print per-IF details */
         for (int tX=0;tX<MAX_TX_IDS;tX++) {
