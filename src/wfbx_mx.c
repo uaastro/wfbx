@@ -725,8 +725,24 @@ int main(int argc, char** argv)
               g_cur_tx_id = tx_id;
               g_cur_epoch_tx_us = epoch_tx_us;
               g_epoch_instant_us = T_epoch_instant_pkt;
+              /* Immediate publish: first epoch value established */
+              if (cs >= 0) {
+                struct wfbx_ctrl_epoch m; memset(&m, 0, sizeof(m));
+                m.h.magic = WFBX_CTRL_MAGIC; m.h.ver = WFBX_CTRL_VER; m.h.type = WFBX_CTRL_EPOCH; m.h.seq = ++epoch_seq;
+                m.epoch_us = g_epoch_instant_us; m.epoch_len_us = 0; m.epoch_gi_us = 0; m.issued_us = mono_us_raw();
+                for (int k=0;k<64;k++) if (subs[k].active) (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl);
+              }
             } else if (g_cur_tx_id == tx_id && g_cur_epoch_tx_us == epoch_tx_us) {
-              if (T_epoch_instant_pkt < g_epoch_instant_us) g_epoch_instant_us = T_epoch_instant_pkt;
+              if (T_epoch_instant_pkt < g_epoch_instant_us) {
+                g_epoch_instant_us = T_epoch_instant_pkt;
+                /* Immediate publish: refined earlier epoch */
+                if (cs >= 0) {
+                  struct wfbx_ctrl_epoch m; memset(&m, 0, sizeof(m));
+                  m.h.magic = WFBX_CTRL_MAGIC; m.h.ver = WFBX_CTRL_VER; m.h.type = WFBX_CTRL_EPOCH; m.h.seq = ++epoch_seq;
+                  m.epoch_us = g_epoch_instant_us; m.epoch_len_us = 0; m.epoch_gi_us = 0; m.issued_us = mono_us_raw();
+                  for (int k=0;k<64;k++) if (subs[k].active) (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl);
+                }
+              }
             } else {
               /* Switching key: capture e_epoch_last for previous key before updating */
               int64_t last = (int64_t)g_epoch_instant_us - (int64_t)g_cur_epoch_tx_us;
@@ -738,6 +754,13 @@ int main(int argc, char** argv)
               g_cur_tx_id = tx_id;
               g_cur_epoch_tx_us = epoch_tx_us;
               g_epoch_instant_us = T_epoch_instant_pkt;
+              /* Immediate publish: new epoch key established */
+              if (cs >= 0) {
+                struct wfbx_ctrl_epoch m; memset(&m, 0, sizeof(m));
+                m.h.magic = WFBX_CTRL_MAGIC; m.h.ver = WFBX_CTRL_VER; m.h.type = WFBX_CTRL_EPOCH; m.h.seq = ++epoch_seq;
+                m.epoch_us = g_epoch_instant_us; m.epoch_len_us = 0; m.epoch_gi_us = 0; m.issued_us = mono_us_raw();
+                for (int k=0;k<64;k++) if (subs[k].active) (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl);
+              }
             }
             /* After tracker update, compute global e_epoch for this packet */
             int64_t eglob = (int64_t)g_epoch_instant_us - (int64_t)epoch_tx_us;
