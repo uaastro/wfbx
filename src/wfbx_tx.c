@@ -247,6 +247,14 @@ static int g_ctrl_enabled = 1; /* control sync enabled by default (can be toggle
 /* Pending epoch adjustment (applied at epoch boundary) */
 static uint64_t g_pending_epoch_us = 0;
 static int g_pending_epoch_valid = 0;
+/* MX epoch messages received (per reporting period) */
+static uint64_t g_mx_epoch_msgs_period = 0;
+/* Base-epoch advancement stats (per reporting period) */
+static uint64_t g_base_adv_period = 0;
+static uint64_t g_base_step_sum = 0;
+static uint64_t g_base_step_min = UINT64_MAX;
+static uint64_t g_base_step_max = 0;
+static uint64_t g_base_step_samples = 0;
 
 static void uds_build_addr(const char* name_in, struct sockaddr_un* sa, socklen_t* sl_out, char* out_norm, size_t out_sz)
 {
@@ -648,6 +656,8 @@ static void* thr_ctrl(void* arg)
     if ((size_t)n >= sizeof(struct wfbx_ctrl_hdr)) {
       const struct wfbx_ctrl_hdr* h = (const struct wfbx_ctrl_hdr*)buf;
       if (h->magic == WFBX_CTRL_MAGIC && h->ver == WFBX_CTRL_VER && h->type == WFBX_CTRL_EPOCH && (size_t)n >= sizeof(struct wfbx_ctrl_epoch)) {
+        /* Count received MX epoch messages for diagnostics */
+        g_mx_epoch_msgs_period++;
         const struct wfbx_ctrl_epoch* m = (const struct wfbx_ctrl_epoch*)buf;
         /* Defer correction if inside our active TX slot */
         uint64_t now = mono_us_raw();
@@ -700,7 +710,24 @@ static inline void epoch_rollover_if_needed(void)
 
 static inline void epoch_base_rollover_if_needed(void)
 {
-  (void)epoch_base_switch_if_needed(mono_us_raw());
+  uint64_t now = mono_us_raw();
+  int advanced = epoch_base_switch_if_needed(now);
+  if (advanced) {
+    /* Gather base step stats: step = cur - prev */
+    uint64_t cur=0, prev=0;
+    pthread_mutex_lock(&g_epoch_base.mtx);
+    cur  = g_epoch_base.cur_us;
+    prev = g_epoch_base.prev_us;
+    pthread_mutex_unlock(&g_epoch_base.mtx);
+    if (cur > prev) {
+      uint64_t step = cur - prev;
+      g_base_step_sum += step;
+      if (g_base_step_min == UINT64_MAX || step < g_base_step_min) g_base_step_min = step;
+      if (step > g_base_step_max) g_base_step_max = step;
+      g_base_step_samples++;
+    }
+    g_base_adv_period++;
+  }
 }
 
 static void* thr_sched(void* arg)
@@ -738,7 +765,7 @@ static void* thr_sched(void* arg)
               (unsigned long long)slot_avg,
               (unsigned long long)slot_min,
               (unsigned long long)slot_max);
-      /* Epoch drift vs base: e_epoch_base = epoch_base - T_epoch */
+      /* Epoch drift vs base + MX counters */
       uint64_t cur_epoch_us = 0, cur_base_us = 0;
       pthread_mutex_lock(&g_epoch.mtx);
       cur_epoch_us = g_epoch.cur_us;
@@ -747,7 +774,18 @@ static void* thr_sched(void* arg)
       cur_base_us = g_epoch_base.cur_us;
       pthread_mutex_unlock(&g_epoch_base.mtx);
       long long e_epoch_base = (long long)((int64_t)cur_base_us - (int64_t)cur_epoch_us);
-      fprintf(stderr, "[TX STAT] e_epoch_base=%lld us\n", e_epoch_base);
+      fprintf(stderr, "[TX STAT] e_epoch_base=%lld us | mx_epoch_msgs=%llu | base_adv=%llu\n",
+              e_epoch_base,
+              (unsigned long long)g_mx_epoch_msgs_period,
+              (unsigned long long)g_base_adv_period);
+      if (g_base_step_samples > 0) {
+        unsigned long long avg = (unsigned long long)(g_base_step_sum / g_base_step_samples);
+        fprintf(stderr, "[TX STAT] base_step_us avg=%llu min=%llu max=%llu n=%llu\n",
+                avg,
+                (unsigned long long)g_base_step_min,
+                (unsigned long long)g_base_step_max,
+                (unsigned long long)g_base_step_samples);
+      }
       /* reset period counters */
       g_tx_t0_ms    = now_ms_tick;
       g_sent_period = 0;
@@ -761,6 +799,13 @@ static void* thr_sched(void* arg)
       g_buf_left_cnt = 0;
       /* reset period-scoped overflow counter */
       g_buf_drop_period = 0;
+      /* reset MX/base counters */
+      g_mx_epoch_msgs_period = 0;
+      g_base_adv_period = 0;
+      g_base_step_sum = 0;
+      g_base_step_min = UINT64_MAX;
+      g_base_step_max = 0;
+      g_base_step_samples = 0;
     }
     epoch_rollover_if_needed();
     epoch_base_rollover_if_needed();
