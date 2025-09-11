@@ -216,6 +216,8 @@ static struct tx_stats TX[MAX_TX_IDS];
 static struct if_stats IFST[MAX_IFS];
 static struct tx_detail TXD[MAX_TX_IDS];
 static struct seq_window SWG[MAX_TX_IDS];
+/* Control epoch send counter (per reporting period) */
+static uint64_t g_ctrl_epoch_send_period = 0;
 
 static void stats_reset_period(int n_if)
 {
@@ -767,7 +769,7 @@ int main(int argc, char** argv)
                 struct wfbx_ctrl_epoch m; memset(&m, 0, sizeof(m));
                 m.h.magic = WFBX_CTRL_MAGIC; m.h.ver = WFBX_CTRL_VER; m.h.type = WFBX_CTRL_EPOCH; m.h.seq = ++epoch_seq;
                 m.epoch_us = g_epoch_instant_us; m.epoch_len_us = 0; m.epoch_gi_us = 0; m.issued_us = mono_us_raw();
-                for (int k=0;k<64;k++) if (subs[k].active) (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl);
+                for (int k=0;k<64;k++) if (subs[k].active) { g_ctrl_epoch_send_period++; (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl); }
               }
             } else if (g_cur_tx_id == tx_id && g_cur_epoch_tx_us == epoch_tx_us) {
               if (T_epoch_instant_pkt < g_epoch_instant_us) {
@@ -777,7 +779,7 @@ int main(int argc, char** argv)
                   struct wfbx_ctrl_epoch m; memset(&m, 0, sizeof(m));
                   m.h.magic = WFBX_CTRL_MAGIC; m.h.ver = WFBX_CTRL_VER; m.h.type = WFBX_CTRL_EPOCH; m.h.seq = ++epoch_seq;
                   m.epoch_us = g_epoch_instant_us; m.epoch_len_us = 0; m.epoch_gi_us = 0; m.issued_us = mono_us_raw();
-                  for (int k=0;k<64;k++) if (subs[k].active) (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl);
+                  for (int k=0;k<64;k++) if (subs[k].active) { g_ctrl_epoch_send_period++; (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl); }
                 }
               }
             } else {
@@ -796,7 +798,7 @@ int main(int argc, char** argv)
                 struct wfbx_ctrl_epoch m; memset(&m, 0, sizeof(m));
                 m.h.magic = WFBX_CTRL_MAGIC; m.h.ver = WFBX_CTRL_VER; m.h.type = WFBX_CTRL_EPOCH; m.h.seq = ++epoch_seq;
                 m.epoch_us = g_epoch_instant_us; m.epoch_len_us = 0; m.epoch_gi_us = 0; m.issued_us = mono_us_raw();
-                for (int k=0;k<64;k++) if (subs[k].active) (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl);
+                for (int k=0;k<64;k++) if (subs[k].active) { g_ctrl_epoch_send_period++; (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl); }
               }
             }
             /* After tracker update, compute global e_epoch for this packet */
@@ -984,6 +986,7 @@ stats_tick:
         double avg_e_epoch_last = (g_e_epoch_last_samples>0)?((double)g_e_epoch_last_sum/(double)g_e_epoch_last_samples):0.0;
         fprintf(stderr, "      e_epoch_last:  avg=%.1f min=%lld max=%lld n=%llu\n",
                 avg_e_epoch_last, (long long)g_e_epoch_last_min, (long long)g_e_epoch_last_max, (unsigned long long)g_e_epoch_last_samples);
+        fprintf(stderr, "      ctrl_epoch_sent=%llu\n", (unsigned long long)g_ctrl_epoch_send_period);
         t0 = t1; pkts = 0;
         /* Reset per-period iface/tx stats */
         stats_reset_period(n_open);
@@ -991,13 +994,14 @@ stats_tick:
         e_delta_sum = 0; e_delta_samples = 0;
         g_e_epoch_sum = 0; g_e_epoch_samples = 0; g_e_epoch_min = 0; g_e_epoch_max = 0;
         g_e_epoch_last_sum = 0; g_e_epoch_last_samples = 0; g_e_epoch_last_min = 0; g_e_epoch_last_max = 0;
+        g_ctrl_epoch_send_period = 0;
 
         /* Publish current T_epoch_instant to subscribers */
         if (cs >= 0 && g_have_epoch_inst) {
           struct wfbx_ctrl_epoch m; memset(&m, 0, sizeof(m));
           m.h.magic = WFBX_CTRL_MAGIC; m.h.ver = WFBX_CTRL_VER; m.h.type = WFBX_CTRL_EPOCH; m.h.seq = ++epoch_seq;
           m.epoch_us = g_epoch_instant_us; m.epoch_len_us = 0; m.epoch_gi_us = 0; m.issued_us = mono_us_raw();
-          for (int k=0;k<64;k++) if (subs[k].active) (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl);
+          for (int k=0;k<64;k++) if (subs[k].active) { g_ctrl_epoch_send_period++; (void)sendto(cs, &m, sizeof(m), 0, (struct sockaddr*)&subs[k].sa, subs[k].sl); }
         }
       }
     }

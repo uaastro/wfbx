@@ -255,6 +255,15 @@ static uint64_t g_base_step_sum = 0;
 static uint64_t g_base_step_min = UINT64_MAX;
 static uint64_t g_base_step_max = 0;
 static uint64_t g_base_step_samples = 0;
+/* Control re-subscribe support */
+static uint8_t  g_tx_id_ctrl = 0;
+static uint64_t g_last_sub_us = 0;
+static uint64_t g_last_epoch_rx_us = 0;
+/* Applied epoch adjustments (per reporting period) */
+static uint64_t g_epoch_adj_count_period = 0;
+static uint64_t g_epoch_adj_abs_sum = 0;
+static uint64_t g_epoch_adj_abs_min = UINT64_MAX;
+static uint64_t g_epoch_adj_abs_max = 0;
 
 static void uds_build_addr(const char* name_in, struct sockaddr_un* sa, socklen_t* sl_out, char* out_norm, size_t out_sz)
 {
@@ -279,15 +288,35 @@ static int ctrl_init(const char* mx_name, uint8_t tx_id)
   if (bind(g_cs, (struct sockaddr*)&g_tx_addr, g_tx_addr_len) != 0) { perror("ctrl bind"); close(g_cs); g_cs=-1; return -1; }
   int fl = fcntl(g_cs, F_GETFL, 0); if (fl >= 0) fcntl(g_cs, F_SETFL, fl | O_NONBLOCK);
   uds_build_addr(mx_name?mx_name:"@wfbx.mx", &g_mx_addr, &g_mx_addr_len, g_mx_name, sizeof(g_mx_name));
-  /* Send SUB */
+  /* Remember tx_id for periodic re-subscribe */
+  g_tx_id_ctrl = tx_id;
+  /* Initial SUB */
   struct wfbx_ctrl_sub sub; memset(&sub, 0, sizeof(sub));
   sub.h.magic = WFBX_CTRL_MAGIC; sub.h.ver = WFBX_CTRL_VER; sub.h.type = WFBX_CTRL_SUB; sub.h.seq = ++g_ctrl_seq;
-  sub.tx_id = tx_id;
-  /* Safely prefix '@' and cap length to avoid truncation warnings */
+  sub.tx_id = g_tx_id_ctrl;
   size_t maxcopy = sizeof(sub.name) - 2; /* '@' + up to maxcopy chars + NUL */
   snprintf(sub.name, sizeof(sub.name), "@%.*s", (int)maxcopy, g_tx_name);
   (void)sendto(g_cs, &sub, sizeof(sub), 0, (struct sockaddr*)&g_mx_addr, g_mx_addr_len);
+  g_last_sub_us = mono_us_raw();
+  fprintf(stderr, "[CTRL] SUB sent (seq=%u) to %s | tx_id=%u\n",
+          (unsigned)sub.h.seq, g_mx_name, (unsigned)g_tx_id_ctrl);
   return 0;
+}
+
+static void ctrl_send_sub(void)
+{
+  if (!g_ctrl_enabled || g_cs < 0) return;
+  struct wfbx_ctrl_sub sub; memset(&sub, 0, sizeof(sub));
+  sub.h.magic = WFBX_CTRL_MAGIC; sub.h.ver = WFBX_CTRL_VER; sub.h.type = WFBX_CTRL_SUB; sub.h.seq = ++g_ctrl_seq;
+  sub.tx_id = g_tx_id_ctrl;
+  size_t maxcopy = sizeof(sub.name) - 2;
+  snprintf(sub.name, sizeof(sub.name), "@%.*s", (int)maxcopy, g_tx_name);
+  (void)sendto(g_cs, &sub, sizeof(sub), 0, (struct sockaddr*)&g_mx_addr, g_mx_addr_len);
+  g_last_sub_us = mono_us_raw();
+  uint64_t since_epoch = (g_last_epoch_rx_us>0 && g_last_sub_us>g_last_epoch_rx_us) ? (g_last_sub_us - g_last_epoch_rx_us) : 0;
+  fprintf(stderr, "[CTRL] re-SUB sent (seq=%u) to %s | tx_id=%u | since_last_epoch=%llu ms\n",
+          (unsigned)sub.h.seq, g_mx_name, (unsigned)g_tx_id_ctrl,
+          (unsigned long long)(since_epoch/1000ull));
 }
 
 static __attribute__((unused)) void ctrl_drain(void)
@@ -493,6 +522,7 @@ static void epoch_adjust_from_mx(uint64_t epoch_mx_us)
   pthread_mutex_lock(&g_epoch.mtx);
   uint64_t T = sf_total(&g_epoch);
   if (T == 0) { pthread_mutex_unlock(&g_epoch.mtx); return; }
+  uint64_t old_cur = g_epoch.cur_us;
   int64_t diff = (int64_t)g_epoch.cur_us - (int64_t)epoch_mx_us;
   int64_t k = llround((double)diff / (double)T);
   uint64_t near = (uint64_t)((int64_t)epoch_mx_us + k*(int64_t)T);
@@ -514,6 +544,16 @@ static void epoch_adjust_from_mx(uint64_t epoch_mx_us)
   }
   g_epoch_start_us = g_epoch.cur_us;
   pthread_mutex_unlock(&g_epoch.mtx);
+
+  /* Count applied correction magnitude (absolute change of current epoch) */
+  uint64_t new_cur = g_epoch_start_us;
+  uint64_t abs_step = (new_cur > old_cur) ? (new_cur - old_cur) : (old_cur - new_cur);
+  if (abs_step > 0) {
+    g_epoch_adj_count_period++;
+    g_epoch_adj_abs_sum += abs_step;
+    if (g_epoch_adj_abs_min == UINT64_MAX || abs_step < g_epoch_adj_abs_min) g_epoch_adj_abs_min = abs_step;
+    if (abs_step > g_epoch_adj_abs_max) g_epoch_adj_abs_max = abs_step;
+  }
 }
 
 /* ---- Helpers for pre-wake sliced sleep to boundary ---- */
@@ -659,6 +699,7 @@ static void* thr_ctrl(void* arg)
         /* Count received MX epoch messages for diagnostics */
         g_mx_epoch_msgs_period++;
         const struct wfbx_ctrl_epoch* m = (const struct wfbx_ctrl_epoch*)buf;
+        g_last_epoch_rx_us = mono_us_raw();
         /* Defer correction if inside our active TX slot */
         uint64_t now = mono_us_raw();
         int defer = 0;
@@ -735,6 +776,16 @@ static void* thr_sched(void* arg)
   (void)arg;
   while (g_run) {
     uint64_t now = mono_us_raw();
+    /* Re-subscribe if MX likely started after us or link lost: */
+    if (g_ctrl_enabled) {
+      int need_resub = 0;
+      /* If we haven't received any epoch yet, or долгое молчание — шлем SUB раз в ~1s */
+      if (g_last_sub_us == 0) need_resub = 1;
+      else if (now - g_last_sub_us >= 1000000ull) {
+        if (g_last_epoch_rx_us == 0 || now - g_last_epoch_rx_us > 1500000ull) need_resub = 1;
+      }
+      if (need_resub) ctrl_send_sub();
+    }
     /* Per-second TX stats tick (independent of sends) */
     uint64_t now_ms_tick = now / 1000ull;
     if (g_tx_t0_ms == 0) g_tx_t0_ms = now_ms_tick;
@@ -786,6 +837,14 @@ static void* thr_sched(void* arg)
                 (unsigned long long)g_base_step_max,
                 (unsigned long long)g_base_step_samples);
       }
+      if (g_epoch_adj_count_period > 0) {
+        unsigned long long avg_adj = (unsigned long long)(g_epoch_adj_abs_sum / g_epoch_adj_count_period);
+        fprintf(stderr, "[TX STAT] epoch_adj abs_us avg=%llu min=%llu max=%llu n=%llu\n",
+                avg_adj,
+                (unsigned long long)g_epoch_adj_abs_min,
+                (unsigned long long)g_epoch_adj_abs_max,
+                (unsigned long long)g_epoch_adj_count_period);
+      }
       /* reset period counters */
       g_tx_t0_ms    = now_ms_tick;
       g_sent_period = 0;
@@ -806,6 +865,11 @@ static void* thr_sched(void* arg)
       g_base_step_min = UINT64_MAX;
       g_base_step_max = 0;
       g_base_step_samples = 0;
+      /* reset epoch adjustment counters */
+      g_epoch_adj_count_period = 0;
+      g_epoch_adj_abs_sum = 0;
+      g_epoch_adj_abs_min = UINT64_MAX;
+      g_epoch_adj_abs_max = 0;
     }
     epoch_rollover_if_needed();
     epoch_base_rollover_if_needed();
