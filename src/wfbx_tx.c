@@ -424,6 +424,8 @@ typedef struct {
 } epoch_state_t;
 
 static epoch_state_t g_epoch = {0,0,0,50000,0,PTHREAD_MUTEX_INITIALIZER};
+/* Base epoch follows initial startup schedule (no MX adjustments). */
+static epoch_state_t g_epoch_base = {0,0,0,50000,0,PTHREAD_MUTEX_INITIALIZER};
 
 static inline uint64_t sf_total(const epoch_state_t* e){ return (uint64_t)e->len_us + (uint64_t)e->gi_us; }
 
@@ -434,6 +436,16 @@ static void epoch_init_from_start(uint64_t epoch_start_us)
   g_epoch.prev_us = epoch_start_us - sf_total(&g_epoch);
   g_epoch.next_us = epoch_start_us + sf_total(&g_epoch);
   pthread_mutex_unlock(&g_epoch.mtx);
+}
+
+/* Initialize base epoch (no adjustments). */
+static void epoch_base_init_from_start(uint64_t epoch_start_us)
+{
+  pthread_mutex_lock(&g_epoch_base.mtx);
+  g_epoch_base.cur_us  = epoch_start_us;
+  g_epoch_base.prev_us = epoch_start_us - sf_total(&g_epoch_base);
+  g_epoch_base.next_us = epoch_start_us + sf_total(&g_epoch_base);
+  pthread_mutex_unlock(&g_epoch_base.mtx);
 }
 
 static int epoch_switch_if_needed(uint64_t now_us)
@@ -449,6 +461,22 @@ static int epoch_switch_if_needed(uint64_t now_us)
   }
   g_epoch_start_us = g_epoch.cur_us;
   pthread_mutex_unlock(&g_epoch.mtx);
+  return advanced;
+}
+
+/* Advance base epoch when time passes (no adjustments). */
+static int epoch_base_switch_if_needed(uint64_t now_us)
+{
+  pthread_mutex_lock(&g_epoch_base.mtx);
+  uint64_t T = sf_total(&g_epoch_base);
+  int advanced = 0;
+  while (now_us >= g_epoch_base.next_us) {
+    g_epoch_base.prev_us = g_epoch_base.cur_us;
+    g_epoch_base.cur_us  = g_epoch_base.next_us;
+    g_epoch_base.next_us = g_epoch_base.cur_us + T;
+    advanced = 1;
+  }
+  pthread_mutex_unlock(&g_epoch_base.mtx);
   return advanced;
 }
 
@@ -483,6 +511,7 @@ static void epoch_adjust_from_mx(uint64_t epoch_mx_us)
 /* ---- Helpers for pre-wake sliced sleep to boundary ---- */
 /* Forward declaration: used from sliced sleep helper */
 static inline void epoch_rollover_if_needed(void);
+static inline void epoch_base_rollover_if_needed(void);
 static inline uint64_t epoch_get_T_open(void)
 {
   uint64_t T_open;
@@ -669,6 +698,11 @@ static inline void epoch_rollover_if_needed(void)
   }
 }
 
+static inline void epoch_base_rollover_if_needed(void)
+{
+  (void)epoch_base_switch_if_needed(mono_us_raw());
+}
+
 static void* thr_sched(void* arg)
 {
   (void)arg;
@@ -704,6 +738,16 @@ static void* thr_sched(void* arg)
               (unsigned long long)slot_avg,
               (unsigned long long)slot_min,
               (unsigned long long)slot_max);
+      /* Epoch drift vs base: e_epoch_base = epoch_base - T_epoch */
+      uint64_t cur_epoch_us = 0, cur_base_us = 0;
+      pthread_mutex_lock(&g_epoch.mtx);
+      cur_epoch_us = g_epoch.cur_us;
+      pthread_mutex_unlock(&g_epoch.mtx);
+      pthread_mutex_lock(&g_epoch_base.mtx);
+      cur_base_us = g_epoch_base.cur_us;
+      pthread_mutex_unlock(&g_epoch_base.mtx);
+      long long e_epoch_base = (long long)((int64_t)cur_base_us - (int64_t)cur_epoch_us);
+      fprintf(stderr, "[TX STAT] e_epoch_base=%lld us\n", e_epoch_base);
       /* reset period counters */
       g_tx_t0_ms    = now_ms_tick;
       g_sent_period = 0;
@@ -719,6 +763,7 @@ static void* thr_sched(void* arg)
       g_buf_drop_period = 0;
     }
     epoch_rollover_if_needed();
+    epoch_base_rollover_if_needed();
 
     pthread_mutex_lock(&g_epoch.mtx);
     uint64_t T_open  = g_epoch.cur_us + (uint64_t)g_slot_start_us;
@@ -1000,6 +1045,11 @@ int main(int argc, char** argv) {
   g_epoch.len_us = g_epoch_len_us; g_epoch.gi_us = g_epoch_gi_us;
   pthread_mutex_unlock(&g_epoch.mtx);
   epoch_init_from_start(g_epoch_start_us);
+  /* Initialize base epoch (no MX adjustments). */
+  pthread_mutex_lock(&g_epoch_base.mtx);
+  g_epoch_base.len_us = g_epoch_len_us; g_epoch_base.gi_us = g_epoch_gi_us;
+  pthread_mutex_unlock(&g_epoch_base.mtx);
+  epoch_base_init_from_start(g_epoch_start_us);
 
   fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d | mx=%s\n",
           ip, port, iface, mcs_idx, gi_short?"short":"long", bw40?"40":"20",
