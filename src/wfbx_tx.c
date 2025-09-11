@@ -824,7 +824,7 @@ static void* thr_sched(void* arg)
       pthread_mutex_lock(&g_epoch_base.mtx);
       cur_base_us = g_epoch_base.cur_us;
       pthread_mutex_unlock(&g_epoch_base.mtx);
-      long long e_epoch_base = (long long)((int64_t)cur_base_us - (int64_t)cur_epoch_us);
+      long long e_epoch_base = (long long)((int64_t)cur_epoch_us - (int64_t)cur_base_us);
       fprintf(stderr, "[TX STAT] e_epoch_base=%lld us | mx_epoch_msgs=%llu | base_adv=%llu\n",
               e_epoch_base,
               (unsigned long long)g_mx_epoch_msgs_period,
