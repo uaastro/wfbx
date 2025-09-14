@@ -1,0 +1,434 @@
+#!/usr/bin/python3
+
+import subprocess
+import click
+import configparser
+import os
+import signal
+import sys
+import logging
+import time
+from threading import Thread
+
+
+def setup_logging(level: str):
+    lvl = getattr(logging, level.upper(), logging.INFO)
+    logging.basicConfig(level=lvl, format='[%(asctime)s] %(levelname)s %(message)s')
+
+
+def spawn_module(name, argv, log_mode="off", log_file=None, env=None, cwd=None):
+    popen_kwargs = dict(env=env, cwd=cwd, preexec_fn=os.setsid, bufsize=1, text=True)
+    fh = None
+    if log_mode == "off":
+        popen_kwargs.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif log_mode == "file":
+        if not log_file:
+            log_file = f"{name}.log"
+        # Ensure directory exists for file-based logging
+        try:
+            dname = os.path.dirname(log_file)
+            if dname:
+                os.makedirs(dname, exist_ok=True)
+        except Exception:
+            pass
+        fh = open(log_file, "a", buffering=1)
+        popen_kwargs.update(stdout=fh, stderr=subprocess.STDOUT)
+    else:  # "stderr" → прокачиваем в общий лог
+        popen_kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    p = subprocess.Popen(argv, **popen_kwargs)
+    if log_mode == "stderr" and p.stdout is not None:
+        def pump(proc, tag):
+            for line in proc.stdout:
+                logging.info("[%s] %s", tag, line.rstrip())
+        t = Thread(target=pump, args=(p, name), daemon=True)
+        t.start()
+    return p, fh
+
+
+def kill_all(pl, timeout_ms=2000):
+    # SIGTERM всей группе, затем по таймауту SIGKILL
+    for rec in pl:
+        p = rec["proc"]
+        try:
+            os.killpg(p.pid, signal.SIGTERM)
+        except Exception:
+            pass
+    deadline = time.time() + timeout_ms / 1000.0
+    for rec in pl:
+        p = rec["proc"]
+        while p.poll() is None and time.time() < deadline:
+            time.sleep(0.05)
+    for rec in pl:
+        p = rec["proc"]
+        if p.poll() is None:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except Exception:
+                pass
+    # закрыть открытые файлы логов
+    for rec in pl:
+        fh = rec.get("fh")
+        if fh:
+            try:
+                fh.close()
+            except Exception:
+                pass
+    pl.clear()
+
+
+@click.command()
+@click.option('--conf', default="wfbx_server.cfg", help='path to config file')
+def main(conf):
+    process_list = []  # {name, proc, fh}
+
+    kill_timeout_ms = 500
+
+    def signal_handler(sig, frame):
+        kill_all(process_list, timeout_ms=kill_timeout_ms)
+        print('wfbX_server was terminated...')
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    wfbx_server_dir = os.path.dirname(os.path.abspath(__file__)) + "/"
+    conf = wfbx_server_dir + conf
+    config = configparser.ConfigParser()
+    config.read(conf)
+    sections = config.sections()
+
+    defaults = config['DEFAULT'] if 'DEFAULT' in config else {}
+    log_level = defaults.get('log_level', 'INFO')
+    setup_logging(log_level)
+
+    process_id = {}
+
+    wfbx_server_version = 'v1.0.1'
+    try:
+        cfg_ver = config['wfbx_server']['wfbx_server_version']
+        kill_timeout_ms = config['wfbx_server']['wfbx_kill_timeout_ms']
+    except:
+        cfg_ver = defaults.get('wfbx_server_version', 'unknown')
+        kill_timeout_ms = int(defaults.get('wfbx_kill_timeout_ms', '500'))
+    
+    print("starting wfbX-server...\n")
+    print(f"wfbX_server_version: {wfbx_server_version}")
+    print(f"wfbX_server_version_cfg: {cfg_ver}")
+
+    try:
+        for section in sections:
+            if section[:4] == 'wlan':
+                options = config[section]
+                wlans = options['wlan'].split()
+                channel = options['channel']
+                bandwidth = options['bandwidth']
+                bw_pf = options['bw_pf']
+                # Настройка интерфейсов (оставляем shell=True как в вашей версии)
+                for wlan in wlans:
+                    subprocess.run(f"ifconfig {wlan} down", shell=True, check=True)
+                    subprocess.run(f"iw dev {wlan} set monitor otherbss", shell=True, check=True)
+                    subprocess.run(f"iw reg set US", shell=True, check=True)
+                    subprocess.run(f"ifconfig {wlan} up", shell=True, check=True)
+                    subprocess.run(f"iw dev {wlan} set channel {channel} HT{bandwidth}{bw_pf}", shell=True, check=True)
+
+            elif section[:6] == 'udp_tx':
+                options = config[section]
+                argv = [wfbx_server_dir + "udp_tx",
+                        "--ip", options['udp_tx_ip'],
+                        "--port", options['udp_tx_port'],
+                        "--pksize", options['udp_tx_pksize'],
+                        "--pks", options['udp_tx_pks'],
+                        "--lid", options['udp_tx_lid']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:12] == 'udp_proxy_tx':
+                options = config[section]
+                argv = [wfbx_server_dir + "udp_proxy_tx",
+                        "--ip_tx", options['uptx_ip_tx'],
+                        "--port_tx", options['uptx_port_tx'],
+                        "--ip_rx", options['uptx_ip_rx'],
+                        "--port_rx", options['uptx_port_rx'],
+                        "--mpkts", options['uptx_mpkts'],
+                        "--ptxn", options['uptx_ptxn'],
+                        "--rpn", options['uptx_rpn'],
+                        "--dl", options['uptx_dl']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:12] == 'udp_proxy_rx':
+                options = config[section]
+                argv = [wfbx_server_dir + "udp_proxy_rx",
+                        "--ip_tx", options['uprx_ip_tx'],
+                        "--port_tx", options['uprx_port_tx'],
+                        "--ip_rx", options['uprx_ip_rx'],
+                        "--port_rx", options['uprx_port_rx'],
+                        "--mpkts", options['uprx_mpkts'],
+                        "--ip_wfbs", options['uprx_ip_wfbs'],
+                        "--port_wfbs", options['uprx_port_wfbs'],
+                        "--mode", options['uprx_mode'],
+                        "--alrt_max", options['uprx_alrt_max']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:13] == 'udp_proxy_fwd':
+                options = config[section]
+                argv = [wfbx_server_dir + "udp_proxy_fwd",
+                        "--ip_tx", options['upfwd_ip_tx'],
+                        "--port_tx", options['upfwd_port_tx'],
+                        "--ip_rx", options['upfwd_ip_rx'],
+                        "--port_rx", options['upfwd_port_rx'],
+                        "--mpkts", options['upfwd_mpkts'],
+                        "--ptxn", options['upfwd_ptxn'],
+                        "--rpn", options['upfwd_rpn'],
+                        "--dl", options['upfwd_dl'],
+                        "--mode", options['upfwd_mode']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:11] == 'uart_to_udp':
+                options = config[section]
+                argv = [wfbx_server_dir + "uart_to_udp",
+                        "--uart", options['utu_uart'],
+                        "--brate", options['utu_brate'],
+                        "--udps_port", options['utu_udps_port'],
+                        "--mode", options['utu_mode']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:13] == 'mav_router_rx':
+                options = config[section]
+                argv = [wfbx_server_dir + "mav_router_rx",
+                        "--ip_r", options['mvrrx_ip_r'],
+                        "--port_r", options['mvrrx_port_r'],
+                        "--ip_mp", options['mvrrx_ip_mp'],
+                        "--port_mp", options['mvrrx_port_mp'],
+                        "--ip_rtx", options['mvrrx_ip_rtx'],
+                        "--port_rtx", options['mvrrx_port_rtx']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:13] == 'mav_router_tx':
+                options = config[section]
+                argv = [wfbx_server_dir + "mav_router_tx",
+                        "--ip_r", options['mvrtx_ip_r'],
+                        "--port_r", options['mvrtx_port_r'],
+                        "--mode", options['mvrtx_mode']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:10] == 'udp_fec_tx':
+                options = config[section]
+                argv = [wfbx_server_dir + "udp_fec_tx",
+                        "--mpkts", options['uftx_mpkts'],
+                        "--ip_rx", options['uftx_ip_rx'],
+                        "--port_rx", options['uftx_port_rx'],
+                        "--ip_tx", options['uftx_ip_tx'],
+                        "--port_tx", options['uftx_port_tx'],
+                        "--k", options['uftx_k'],
+                        "--m", options['uftx_m']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:10] == 'udp_fec_rx':
+                options = config[section]
+                argv = [wfbx_server_dir + "udp_fec_rx",
+                        "--mpkts", options['ufrx_mpkts'],
+                        "--ip_rx", options['ufrx_ip_rx'],
+                        "--port_rx", options['ufrx_port_rx'],
+                        "--ip_tx", options['ufrx_ip_tx'],
+                        "--port_tx", options['ufrx_port_tx'],
+                        "--port_wfbs", options['ufrx_port_wfbs'],
+                        "--ip_wfbs", options['ufrx_ip_wfbs']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:11] == 'udp_to_uart':
+                options = config[section]
+                argv = [wfbx_server_dir + "udp_to_uart",
+                        "--port_rx", options['udtu_port_rx'],
+                        "--ip_rx", options['udtu_ip_rx'],
+                        "--uart", options['udtu_uart'],
+                        "--brate", options['udtu_brate']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:2] == 'mx':
+                # wfbx_mx
+                options = config[section]
+                argv = [wfbx_server_dir + "wfbx_mx",
+                        "--ip", options['mx_ip'],
+                        "--port", options['mx_port'],
+                        "--tx_id", options['mx_tx_id'],
+                        "--alpha", options['mx_alpha'],
+                        "--delta_us", options['mx_delta_us'],
+                        "--ctrl", options['mx_ctrl'],
+                        "--d_max", options['mx_d_max'],
+                        "--stat_period", options['mx_stat_period']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:4] == 'x_tx':
+                # wfbx_tx
+                options = config[section]
+                argv = [wfbx_server_dir + "wfbx_tx",
+                        "--ip", options['xtx_ip'],
+                        "--port", options['xtx_port'],
+                        "--mcs_idx", options['xtx_mcs_idx'],
+                        "--gi", options['xtx_gi'],
+                        "--bw", options['xtx_bw'],
+                        "--ldpc", options['xtx_ldpc'],
+                        "--stbc", options['xtx_stbc'],
+                        "--group_id", options['xtx_group_id'],
+                        "--tx_id", options['xtx_tx_id'],
+                        "--link_id", options['xtx_link_id'],
+                        "--radio_port", options['xtx_radio_port'],
+                        "--mx", options['xtx_mx'],
+                        "--epoch_len", options['xtx_epoch_len'],
+                        "--epoch_gi", options['xtx_epoch_gi'],
+                        "--slot_start", options['xtx_slot_start'],
+                        "--slot_len", options['xtx_slot_len'],
+                        "--gi_tx", options['xtx_gi_tx'],
+                        "--delta_us", options['xtx_delta_us'],
+                        "--d_max", options['xtx_d_max'],
+                        "--eps_us", options['xtx_eps_us'],
+                        "--send_gi", options['xtx_send_gi'],
+                        "--prewake_q", options['xtx_prewake_q'],
+                        "--prewake_min", options['xtx_prewake_min'],
+                        "--stat_period", options['xtx_stat_period'],
+                        "--epoch_sync", options['xtx_epoch_sync']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:4] == 'x_rx':
+                # wfbx_rx
+                options = config[section]
+                argv = [wfbx_server_dir + "wfbx_rx",
+                        "--ip", options['xrx_ip'],
+                        "--port", options['xrx_port'],
+                        "--tx_id", options['xrx_tx_id'],
+                        "--link_id", options['xrx_link_id'],
+                        "--radio_port", options['xrx_radio_port'],
+                        "--stat_period", options['xrx_stat_period']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:2] == 'tx':
+                # legacy wfb_tx
+                options = config[section]
+                argv = [wfbx_server_dir + "wfb_tx",
+                        "--ip", options['tx_ip'],
+                        "--port", options['tx_port'],
+                        "--mcs_idx", options['tx_mcs_idx'],
+                        "--gi", options['tx_gi'],
+                        "--bw", options['tx_bw'],
+                        "--ldpc", options['tx_ldpc'],
+                        "--stbc", options['tx_stbc'],
+                        "--group_id", options['tx_group_id'],
+                        "--tx_id", options['tx_tx_id'],
+                        "--link_id", options['tx_link_id'],
+                        "--radio_port", options['tx_radio_port']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:2] == 'rx':
+                # legacy wfb_rx
+                options = config[section]
+                argv = [wfbx_server_dir + "wfb_rx",
+                        "--ip", options['rx_ip'],
+                        "--port", options['rx_port'],
+                        "--tx_id", options['rx_tx_id'],
+                        "--link_id", options['rx_link_id'],
+                        "--radio_port", options['rx_radio_port'],
+                        "--stat_period", options['rx_stat_period']]
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section[:4] == 'util':
+                options = config[section]
+                argv = [options['util_exec']]
+                param_list = options.get('util_param', '').split(' ')
+                if param_list != ['']:
+                    argv += param_list
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+        logging.info("wfbX_server started")
+
+        while True:
+            # мониторим завершения
+            for rec in list(process_list):
+                p = rec["proc"]
+                rc = p.poll()
+                if rc is not None:
+                    name = rec["name"]
+                    if rc != 0:
+                        print(f"[{name}] error! return code: {rc}")
+                        logging.error(f"[{name}] error! return code: {rc}")
+                        kill_all(process_list, timeout_ms=kill_timeout_ms)
+                        print('wfbX_server was terminated...')
+                        sys.exit(0)
+                    else:
+                        logging.info(f"[{name}] exited with code 0")
+                        kill_all(process_list, timeout_ms=kill_timeout_ms)
+                        print('wfbX_server stopped (module exited)')
+                        sys.exit(0)
+            time.sleep(0.2)
+
+    except Exception as e:
+        print(e)
+        kill_all(process_list, timeout_ms=kill_timeout_ms)
+        print('wfb_server was terminated...')
+        sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()

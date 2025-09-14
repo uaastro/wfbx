@@ -7,7 +7,7 @@ StartLimitBurst=21
 [Service]
 Type=simple
 RemainAfterExit=no
-ExecStart=/usr/sbin/wfb_server/wfb_server
+ExecStart=/usr/sbin/wfbx_server/wfbx_server
 User=root
 TimeoutStopSec=5s
 Restart=always

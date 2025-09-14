@@ -1112,6 +1112,13 @@ int main(int argc, char** argv) {
   /* open UDP socket and bind */
   int us = socket(AF_INET, SOCK_DGRAM, 0);
   if (us < 0) { perror("socket"); return 1; }
+  {
+    int one = 1;
+    (void)setsockopt(us, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+#ifdef SO_REUSEPORT
+    (void)setsockopt(us, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+#endif
+  }
   struct sockaddr_in sa;
   memset(&sa, 0, sizeof(sa));
   sa.sin_family = AF_INET;

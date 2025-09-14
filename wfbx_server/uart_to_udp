@@ -1,0 +1,106 @@
+#!/usr/bin/python3
+
+import serial
+import socket
+import click
+
+STX_v2_0 = b'\xfd'
+STX_v1_0 = b'\xfe'
+STX_v0_9 = b'\x55'
+
+mode_mavlink_v1_v2 = 0
+mode_mavlink_v1 = 1
+mode_mavlink_v2 = 2
+mode_readline = 3
+
+@click.command()
+@click.option('--uart', default='/dev/ttyUSB0', help='source uart port name def: /dev/ttyS0')
+@click.option('--brate', default=115200, help='source uart port baudrate def: 115200')
+@click.option('--udps_ip', default='127.0.0.1', help='destination ip def: 127.0.0.1')
+@click.option('--udps_port', default=14800, help='destination port')
+@click.option('--mode', default=0, help='mode of data parsing form uart the default is 0 (mavlink v.1.0 & v2.0)' +
+            'mode_mavlink_v1_v2 = 0 ' +
+            'mode_mavlink_v1 = 1 '+
+            'mode_mavlink_v2 = 2 '+
+            'mode_readline = 3')
+
+def main(uart,brate,udps_ip,udps_port,mode):
+
+    UART_PORT = uart
+    UART_BAUDRATE = brate
+    UDP_SERVER_IP = udps_ip
+    UDP_SERVER_PORT = udps_port
+
+    ser = serial.Serial(UART_PORT, UART_BAUDRATE)
+    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_address = (UDP_SERVER_IP, UDP_SERVER_PORT)
+    print("uart_to_udp have started...")
+    print(f"mode: {mode}")
+    print (f"{UART_PORT}:{UART_BAUDRATE}")
+    print (f"{udp_address}")
+
+    if mode == 0:
+        while True:
+            try:
+                start_of_frame = ser.read(1)
+                if start_of_frame == STX_v2_0:
+                    header = ser.read(9)
+                    payload_length = header[0]
+                    mavlink_packet = start_of_frame + header + ser.read(payload_length) + ser.read(2)
+                    if header[1] == 1:
+                        mavlink_packet += ser.read(13)
+                    udp_socket.sendto(mavlink_packet, udp_address)
+                elif start_of_frame == STX_v1_0:
+                    header = ser.read(5)
+                    payload_length = header[0]
+                    mavlink_packet = start_of_frame + header + ser.read(payload_length) + ser.read(2)
+                    udp_socket.sendto(mavlink_packet, udp_address)
+            except Exception as e:
+                print (f"error: {e}")
+                ser.close()
+                ser = serial.Serial(UART_PORT, UART_BAUDRATE,timeout = 1)
+
+    elif mode == 1:
+        while True:
+            try:
+                start_of_frame = ser.read(1)
+                if start_of_frame == STX_v1_0:
+                    header = ser.read(5)
+                    payload_length = header[0]
+                    mavlink_packet = start_of_frame + header + ser.read(payload_length) + ser.read(2)
+                    udp_socket.sendto(mavlink_packet, udp_address)
+            except Exception as e:
+                print (f"error: {e}")
+                ser.close()
+                ser = serial.Serial(UART_PORT, UART_BAUDRATE,timeout = 1)
+
+    elif mode == 2:
+        while True:
+            try:
+                start_of_frame = ser.read(1)
+                if start_of_frame == STX_v2_0:
+                    header = ser.read(9)
+                    payload_length = header[0]
+                    mavlink_packet = start_of_frame + header + ser.read(payload_length) + ser.read(2)
+                    if header[1] == 1:
+                        mavlink_packet += ser.read(13)
+                    udp_socket.sendto(mavlink_packet, udp_address)
+            except Exception as e:
+                print (f"error: {e}")
+                ser.close()
+                ser = serial.Serial(UART_PORT, UART_BAUDRATE,timeout = 1)
+    
+    elif mode == 3:
+        while True:
+            try:
+                pkt = ser.readline()
+                stat_ln = pkt.decode('ascii',errors='ignore').strip()
+                print(stat_ln)
+                udp_socket.sendto(pkt, udp_address)
+            except Exception as e:
+                print (f"error: {e}")
+                ser.close()
+                ser = serial.Serial(UART_PORT, UART_BAUDRATE,timeout = 1)
+
+if __name__ == '__main__':
+    main()
