@@ -11,6 +11,7 @@ pip install pymavlink
 pip install zfec
 
 # Build
+build.sh
 
 # Install
 
@@ -19,13 +20,16 @@ cp ./wfbx_server/wfbx.service /etc/systemd/system/
 
 # Create key and copy to right location
 #./wfb_keygen
-cp ./cfg/*.key /etc/
+#cp ./cfg/*.key /etc/
 
-#cp wfb_tx /usr/bin/
-#cp wfb_rx /usr/bin/
-#cp wfb_keygen /usr/sbin/wfb_server/
+#cp ./bin/wfb_tx /usr/bin/
+#cp ./bin/wfb_rx /usr/bin/
+#cp ./bin/wfbx_tx /usr/bin/
+#cp ./bin/wfbx_rx /usr/bin/
+#cp ./bin/wfbx_mx /usr/bin/
+#cp ./bin/wfb_keygen /usr/sbin/wfbx_server/
 
-/usr/sbin/wfb_server/add_wlan wlx*
+/usr/sbin/wfbx_server/add_wlan wlx*
 
 cat <<EOF >> /etc/bash.bashrc
 export PATH=\$PATH:/usr/sbin/wfbx_server
