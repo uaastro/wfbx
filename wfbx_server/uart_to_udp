@@ -3,6 +3,9 @@
 import serial
 import socket
 import click
+import atexit
+import signal
+import sys
 
 STX_v2_0 = b'\xfd'
 STX_v1_0 = b'\xfe'
@@ -25,6 +28,30 @@ mode_readline = 3
             'mode_readline = 3')
 
 def main(uart,brate,udps_ip,udps_port,mode):
+    
+    udp_socket = None
+    ser = None
+
+    def cleanup():
+        try:
+            if udp_socket is not None:
+                udp_socket.close()
+        except Exception as e:
+            print(e)
+        try:
+            if ser is not None:
+                ser.close()
+        except Exception as e:
+            print(e)
+                
+    def signal_handler(sig, frame):
+        cleanup()
+        sys.exit(0)
+    
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+        
 
     UART_PORT = uart
     UART_BAUDRATE = brate

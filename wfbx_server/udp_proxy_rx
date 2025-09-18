@@ -1,5 +1,8 @@
 #!/usr/bin/python3
 import socket
+import atexit
+import signal
+import sys
 import struct
 import click
 import sys
@@ -18,6 +21,26 @@ import time
 @click.option('--alrt_max', default=10, help='max number of alert pkt')
 
 def main(mpkts,ip_tx,port_tx,ip_rx,port_rx,port_wfbs,ip_wfbs, mode, alrt_max):
+
+    sock_rx = None
+    sock_tx = None
+    
+    def cleanup():
+        for s in (sock_rx, sock_tx):
+            try:
+                if s is not None:
+                    s.close()
+            except Exception as e:
+                print(e)
+                
+    def signal_handler(sig, frame):
+        cleanup()
+        sys.exit(0)
+        
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
 
     UDP_MAX_PKT_SIZE = mpkts
     UDP_IP_TX= ip_tx
@@ -86,4 +109,3 @@ def main(mpkts,ip_tx,port_tx,ip_rx,port_rx,port_wfbs,ip_wfbs, mode, alrt_max):
 
 if __name__ == '__main__':
     main()
-

@@ -3,7 +3,9 @@ import socket
 import struct
 import click
 import zfec
-
+import atexit
+import signal
+import sys
 
 def fec_encode(d_k,d_m,bloks: list) -> list:
     encoder = zfec.Encoder(d_k, d_m)
@@ -51,6 +53,25 @@ def ring_blocks_encoder(rb_id,e_k,e_m, blocks: list) -> list:
 
 def main(mpkts,ip_rx,port_rx,ip_tx,port_tx,k,m):
 
+    sock_rx = None
+    sock_tx = None
+
+    def cleanup():
+        for s in (sock_rx, sock_tx):
+            try:
+                if s is not None:
+                    s.close()
+            except Exception as e:
+                print(e)
+                
+    def signal_handler(sig, frame):
+        cleanup()
+        sys.exit(0)
+    
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     #--init--
     sock_tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:

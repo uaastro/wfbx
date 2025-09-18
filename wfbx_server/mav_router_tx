@@ -2,6 +2,9 @@
 import socket
 import serial
 import click
+import atexit
+import signal
+import sys
 
 # --- stat info
 #import time
@@ -12,6 +15,31 @@ import click
 @click.option('--mode', default=0, help='mode 0 (default) mirrow, mode 1 strip')
 
 def main(port_r,ip_r,mode):
+
+    sock_proxy = None
+    ser_1 = None
+    ser_2 = None
+
+    def cleanup():
+        try:
+            if sock_proxy is not None:
+                sock_proxy.close()
+        except Exception as e:
+            print(e)
+        for ser in (ser_1, ser_2):    
+            try:
+                if ser is not None:
+                    ser.close()
+            except Exception as e:
+                print(e)
+                
+    def signal_handler(sig, frame):
+        cleanup()
+        sys.exit(0)
+    
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     UDP_IP_ROUTER = ip_r
     UDP_PORT_ROUTER = port_r

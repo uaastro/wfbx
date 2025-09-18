@@ -2,6 +2,9 @@
 import socket
 import time
 import click
+import atexit
+import signal
+import sys
 
 @click.command()
 @click.option('--mpkts', default=2048, help='udp max pkt size def: 2048')
@@ -15,6 +18,25 @@ import click
 @click.option('--mode', default=0, help='mode 0 (default) mirrow, mode 1 strip')
 
 def main(mpkts,ip_rx,port_rx,ip_tx,port_tx,ptxn,rpn,dl,mode):
+
+    sock_tx = None
+    sock_rx = None
+    
+    def cleanup():
+        for s in (sock_rx, sock_tx):
+            try:
+                if s is not None:
+                    s.close()
+            except Exception as e:
+                print(e)
+                
+    def signal_handler(sig, frame):
+        cleanup()
+        sys.exit(0)
+        
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
     
     UDP_MAX_PKT_SIZE = mpkts
     UDP_IP_RX= ip_rx

@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+
+import curses
+import json
+import os
+import selectors
+import socket
+import time
+import click
+
+
+def parse_addr(addr: str):
+    # Supported forms:
+    #  - "@wfbx.stat" (UDS abstract)
+    #  - "uds:@wfbx.stat"
+    #  - "udp:127.0.0.1:9100" or "127.0.0.1:9100"
+    if addr.startswith('uds:'):
+        return ('uds', addr[4:])
+    if addr.startswith('udp:'):
+        host_port = addr[4:]
+        host, port = host_port.rsplit(':', 1)
+        return ('udp', (host, int(port)))
+    # default: uds if starts with '@'
+    if addr and addr[0] == '@':
+        return ('uds', addr)
+    # else assume udp host:port
+    host, port = addr.rsplit(':', 1)
+    return ('udp', (host, int(port)))
+
+
+def make_rx_socket(kind, target):
+    if kind == 'uds':
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        # abstract namespace bind: first byte NUL, then name without '@'
+        name = target[1:] if target and target[0] == '@' else target
+        bind_path = '\0' + (name or 'wfbx.stat')
+        s.bind(bind_path)
+        return s
+    else:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, 'SO_REUSEPORT'):
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except OSError:
+                pass
+        host, port = target
+        s.bind((host, port))
+        return s
+
+
+def trim(s, width):
+    if len(s) <= width:
+        return s
+    if width <= 1:
+        return s[:width]
+    return s[: width - 1] + '…'
+
+
+def summarize_row(mod):
+    # Build a concise summary per module based on last_event and data
+    ev = mod.get('event') or ''
+    d = mod.get('data') or {}
+    t = mod.get('type') or ''
+    if ev == 'tx_stat' or (t in ('x_tx', 'tx') and d):
+        parts = []
+        for k in ('udp_rx', 'sent'):
+            if k in d:
+                parts.append(f"{k}={d[k]}")
+        if 'e_epoch_base' in d:
+            parts.append(f"e_base={d['e_epoch_base']}")
+        if 'mx_epoch_msgs' in d:
+            parts.append(f"mx_msgs={d['mx_epoch_msgs']}")
+        return ' '.join(parts)
+    if ev == 'mx_stat' or t == 'mx':
+        parts = []
+        E = d.get('e_epoch_glob') or {}
+        if 'avg' in E:
+            parts.append(f"e_glob_avg={E['avg']:.1f}")
+        if 'ctrl_epoch_sent' in d:
+            parts.append(f"sent={d['ctrl_epoch_sent']}")
+        return ' '.join(parts)
+    if ev == 'rx_stat' or t in ('x_rx', 'rx'):
+        parts = []
+        for k in ('pkts', 'kbps', 'lost'):
+            if k in d:
+                parts.append(f"{k}={d[k]}")
+        return ' '.join(parts)
+    # fallback: show up to 3 keys
+    shown = []
+    for k in list(d.keys())[:3]:
+        shown.append(f"{k}={d[k]}")
+    return ' '.join(shown)
+
+
+@click.command()
+@click.option('--addr', default='@wfbx.stat', help='stats bus address: uds:@name or udp:host:port (default uds:@wfbx.stat)')
+@click.option('--refresh', default=500, show_default=True, help='refresh interval (ms)')
+@click.option('--idle_ms', default=5000, show_default=True, help='evict module if not seen for this time (ms)')
+@click.option('--filter_id', default='', help='substring filter for module_id')
+@click.option('--filter_type', default='', help='substring filter for module_type')
+def main(addr, refresh, idle_ms, filter_id, filter_type):
+    kind, target = parse_addr(addr)
+    s = make_rx_socket(kind, target)
+    s.setblocking(False)
+    sel = selectors.DefaultSelector()
+    sel.register(s, selectors.EVENT_READ)
+
+    modules = {}  # module_id -> dict
+
+    def evict_stale(now):
+        cutoff = now - (idle_ms / 1000.0)
+        stale = [m for m, v in modules.items() if v.get('ts', 0) < cutoff]
+        for m in stale:
+            modules.pop(m, None)
+
+    def handle_packet(data):
+        try:
+            msg = json.loads(data.decode('utf-8', 'replace'))
+            mid = msg.get('module_id') or 'unknown'
+            mt = msg.get('module_type') or 'unknown'
+            ev = msg.get('event') or ''
+            d = msg.get('data') or {}
+            rec = modules.get(mid) or {}
+            rec.update({
+                'type': mt,
+                'event': ev,
+                'data': d,
+                'pid': msg.get('pid'),
+                'host': msg.get('host'),
+                'ts': msg.get('ts') or time.time(),
+            })
+            modules[mid] = rec
+        except Exception:
+            # ignore malformed
+            pass
+
+    def draw(stdscr):
+        stdscr.erase()
+        H, W = stdscr.getmaxyx()
+        header = f"wfbx_top addr={addr} modules={len(modules)} filters:id='{filter_id}' type='{filter_type}'  q:quit"
+        stdscr.addnstr(0, 0, header, W - 1)
+        stdscr.hline(1, 0, '-', max(0, W - 1))
+        col_names = ["module_id", "type", "age", "event", "summary"]
+        stdscr.addnstr(2, 0, "{:<20} {:<7} {:>5} {:<10} {}".format(*col_names), W - 1)
+        stdscr.hline(3, 0, '=', max(0, W - 1))
+        now = time.time()
+        rows = H - 4
+        # filter and sort by module_id
+        items = []
+        for mid, v in modules.items():
+            if filter_id and filter_id not in mid:
+                continue
+            mt = v.get('type') or ''
+            if filter_type and filter_type not in mt:
+                continue
+            items.append((mid, v))
+        items.sort(key=lambda x: x[0])
+        for i, (mid, v) in enumerate(items[: max(0, rows)]):
+            age = max(0.0, now - (v.get('ts') or now))
+            age_s = f"{age:4.1f}s"
+            ev = v.get('event') or ''
+            summ = summarize_row(v)
+            line = "{:<20} {:<7} {:>5} {:<10} {}".format(trim(mid, 20), trim(v.get('type') or '', 7), age_s, trim(ev, 10), trim(summ, max(0, W - 48)))
+            stdscr.addnstr(4 + i, 0, line, W - 1)
+        stdscr.refresh()
+
+    def loop(stdscr):
+        stdscr.nodelay(True)
+        curses.curs_set(0)
+        next_draw = 0
+        while True:
+            now = time.time()
+            timeout = max(0.0, (next_draw - now)) if next_draw > 0 else (refresh / 1000.0)
+            events = sel.select(timeout)
+            for key, _ in events:
+                try:
+                    data = key.fileobj.recv(16384)
+                    if data:
+                        handle_packet(data)
+                except BlockingIOError:
+                    pass
+            if now >= next_draw:
+                evict_stale(now)
+                draw(stdscr)
+                next_draw = now + (refresh / 1000.0)
+            try:
+                ch = stdscr.getch()
+                if ch == ord('q') or ch == ord('Q'):
+                    break
+            except Exception:
+                pass
+
+    curses.wrapper(loop)
+
+
+if __name__ == '__main__':
+    main()
+

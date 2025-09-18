@@ -4,6 +4,7 @@ import subprocess
 import click
 import configparser
 import os
+import atexit
 import signal
 import sys
 import logging
@@ -45,7 +46,7 @@ def spawn_module(name, argv, log_mode="off", log_file=None, env=None, cwd=None):
     return p, fh
 
 
-def kill_all(pl, timeout_ms=2000):
+def kill_all(pl, timeout_ms=10):
     # SIGTERM всей группе, затем по таймауту SIGKILL
     for rec in pl:
         p = rec["proc"]
@@ -81,13 +82,17 @@ def kill_all(pl, timeout_ms=2000):
 def main(conf):
     process_list = []  # {name, proc, fh}
 
-    kill_timeout_ms = 500
+    kill_timeout_ms = 10
 
     def signal_handler(sig, frame):
         kill_all(process_list, timeout_ms=kill_timeout_ms)
         print('wfbX_server was terminated...')
         sys.exit(0)
 
+    def cleanup():
+        kill_all(process_list, timeout_ms=kill_timeout_ms)
+        
+    atexit.register(cleanup)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
@@ -106,10 +111,10 @@ def main(conf):
     wfbx_server_version = 'v1.0.1'
     try:
         cfg_ver = config['wfbx_server']['wfbx_server_version']
-        kill_timeout_ms = config['wfbx_server']['wfbx_kill_timeout_ms']
+        kill_timeout_ms = int(config['wfbx_server']['wfbx_kill_timeout_ms'])
     except:
         cfg_ver = defaults.get('wfbx_server_version', 'unknown')
-        kill_timeout_ms = int(defaults.get('wfbx_kill_timeout_ms', '500'))
+        kill_timeout_ms = int(defaults.get('wfbx_kill_timeout_ms', '10'))
     
     print("starting wfbX-server...\n")
     print(f"wfbX_server_version: {wfbx_server_version}")
