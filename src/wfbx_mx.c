@@ -34,6 +34,10 @@
 #include <strings.h>
 #include <sys/un.h>
 #include <fcntl.h>
+#include <math.h>
+#include <stdbool.h>
+
+#include "wfbx_stats_pkt.h"
 
 #ifdef __linux__
   #include <endian.h>
@@ -97,6 +101,70 @@ static int64_t  g_e_epoch_last_sum = 0;
 static int64_t  g_e_epoch_last_min = INT64_C(0);
 static int64_t  g_e_epoch_last_max = INT64_C(0);
 static uint64_t g_e_epoch_last_samples = 0;
+
+#define WFBX_MX_STATS_MAX_PACKET 1400
+
+static uint8_t g_mx_stats_packet[WFBX_MX_STATS_MAX_PACKET];
+static size_t g_mx_stats_packet_len = 0;
+static uint32_t g_mx_stats_tick_id = 0;
+static char g_mx_stats_module_id[24] = "mx";
+
+typedef struct {
+    wfbx_mx_tx_summary_t summary;
+} mx_tx_entry_t;
+
+typedef struct {
+    wfbx_mx_if_detail_t detail;
+    wfbx_mx_chain_detail_t chains[RX_ANT_MAX];
+} mx_if_entry_t;
+
+#define MX_MAX_IF_ENTRIES (MAX_TX_IDS * MAX_IFS)
+
+static inline uint16_t clamp_u16(uint32_t v) { return (uint16_t)(v > 0xFFFFu ? 0xFFFFu : v); }
+
+static inline uint16_t clamp_permille(int value)
+{
+    if (value < 0) return 0;
+    if (value > 1000) return 1000;
+    return (uint16_t)value;
+}
+
+static inline int16_t to_q8(double value)
+{
+    long temp = lrint(value * 256.0);
+    if (temp < INT16_MIN) temp = INT16_MIN;
+    if (temp > INT16_MAX) temp = INT16_MAX;
+    return (int16_t)temp;
+}
+
+static inline int32_t to_q4(double value)
+{
+    long temp = lrint(value * 16.0);
+    if (temp < INT32_MIN) temp = INT32_MIN;
+    if (temp > INT32_MAX) temp = INT32_MAX;
+    return (int32_t)temp;
+}
+
+static inline int32_t to_q4_from_i64(int64_t value)
+{
+    long long temp = value * 16ll;
+    if (temp < INT32_MIN) temp = INT32_MIN;
+    if (temp > INT32_MAX) temp = INT32_MAX;
+    return (int32_t)temp;
+}
+
+static int append_section(uint8_t* dst, size_t* offset, size_t cap, uint16_t type, const uint8_t* data, uint16_t length)
+{
+    if (!dst || !offset) return -1;
+    if (*offset + 4u + length > cap) return -1;
+    dst[*offset + 0] = (uint8_t)(type >> 8);
+    dst[*offset + 1] = (uint8_t)(type & 0xFF);
+    dst[*offset + 2] = (uint8_t)(length >> 8);
+    dst[*offset + 3] = (uint8_t)(length & 0xFF);
+    if (length > 0 && data) memcpy(dst + *offset + 4, data, length);
+    *offset += 4u + length;
+    return 0;
+}
 
 /* ---- Global dedup per TX (12-bit seq) and stats containers ---- */
 struct seq_window {
@@ -498,6 +566,9 @@ struct cli_cfg {
   uint32_t epoch_gi_us;     /* publish inter-superframe guard */
   double  d_max_km;         /* max distance (km) ⇒ tau_us */
   int debug_stats;          /* enable extended epoch diagnostics */
+  const char* stat_ip;      /* stats server IP */
+  int stat_port;            /* stats server port */
+  const char* stat_id;      /* stats module id override */
 };
 
 static void print_help(const char* prog)
@@ -506,6 +577,9 @@ static void print_help(const char* prog)
          "Options:\n"
          "  --ip <addr>         UDP destination IP (default: %s)\n"
          "  --port <num>        UDP destination port (default: %d)\n"
+         "  --stat_ip <addr>    Stats server IP (default: 127.0.0.1)\n"
+         "  --stat_port <num>   Stats server port (default: 9601)\n"
+         "  --stat_id <name>    Stats module identifier (default: mx)\n"
          "  --tx_id <list>      Filter by TX IDs: 'any' | '1,2,10-12' | '!3,7' (default: any)\n"
          "  --alpha <0..1>      EMA coefficient for T_epoch (default: 0.3)\n"
          "  --delta_us <num>    Stack latency in us (default: 1500)\n"
@@ -520,12 +594,16 @@ static void print_help(const char* prog)
 static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
 {
   cfg->ip = g_dest_ip_default; cfg->port = g_dest_port_default; cfg->n_if = 0; cfg->stat_period_ms = 1000; cfg->txf.mode = TXF_ANY;
+  cfg->stat_ip = "127.0.0.1"; cfg->stat_port = 9601; cfg->stat_id = NULL;
   cfg->alpha = 0.3; cfg->tau_us = 0; cfg->delta_us = 700; cfg->ctrl_addr = "@wfbx.mx"; cfg->epoch_len_us = 0; cfg->epoch_gi_us = 0; cfg->d_max_km = 0.0;
   cfg->debug_stats = 0;
   static struct option longopts[] = {
     {"ip",           required_argument, 0, 0},
     {"port",         required_argument, 0, 0},
     {"tx_id",        required_argument, 0, 0},
+    {"stat_ip",     required_argument, 0, 0},
+    {"stat_port",   required_argument, 0, 0},
+    {"stat_id",     required_argument, 0, 0},
     {"alpha",        required_argument, 0, 0},
     {"delta_us",     required_argument, 0, 0},
     {"ctrl",         required_argument, 0, 0},
@@ -541,6 +619,9 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
       if      (strcmp(name,"ip")==0)          cfg->ip = val;
       else if (strcmp(name,"port")==0)        cfg->port = atoi(val);
       else if (strcmp(name,"tx_id")==0)       txf_parse(&cfg->txf, val);
+      else if (strcmp(name,"stat_ip")==0)     cfg->stat_ip = val;
+      else if (strcmp(name,"stat_port")==0)   cfg->stat_port = atoi(val);
+      else if (strcmp(name,"stat_id")==0)     cfg->stat_id = val;
       else if (strcmp(name,"alpha")==0)       cfg->alpha = atof(val);
       else if (strcmp(name,"delta_us")==0)    cfg->delta_us = atoi(val);
       else if (strcmp(name,"ctrl")==0)        cfg->ctrl_addr = val;
@@ -580,6 +661,16 @@ int main(int argc, char** argv)
   struct sockaddr_in dst; memset(&dst, 0, sizeof(dst)); dst.sin_family = AF_INET; dst.sin_port = htons(cli.port);
   if (!inet_aton(cli.ip, &dst.sin_addr)) { fprintf(stderr, "inet_aton failed for %s\n", cli.ip); return 1; }
 
+  int stat_sock = socket(AF_INET, SOCK_DGRAM, 0);
+  struct sockaddr_in stat_addr; memset(&stat_addr, 0, sizeof(stat_addr)); stat_addr.sin_family = AF_INET; stat_addr.sin_port = htons(cli.stat_port);
+  if (stat_sock >= 0) {
+    if (!inet_aton(cli.stat_ip, &stat_addr.sin_addr)) {
+      fprintf(stderr, "inet_aton failed for stats server %s\n", cli.stat_ip);
+      close(stat_sock);
+      stat_sock = -1;
+    }
+  }
+
   /* Open PCAP for each interface */
   pcap_t* ph[MAX_IFS] = {0}; int fds[MAX_IFS]; for (int i=0;i<MAX_IFS;i++) fds[i] = -1; int n_open = 0; char err[PCAP_ERRBUF_SIZE]={0};
   for (int i=0;i<cli.n_if; ++i) {
@@ -591,13 +682,20 @@ int main(int argc, char** argv)
   if (n_open == 0) { fprintf(stderr, "No usable interfaces opened.\n"); return 1; }
 
   fprintf(stderr, "MX RX on: "); for (int i=0;i<n_open;i++) fprintf(stderr, "%s%s", cli.ifname[i], (i+1<n_open?", ":""));
-  fprintf(stderr, " | UDP %s:%d | stat %d ms | alpha=%.2f delta_us=%d tau_us=%d | ctrl=%s\n",
+  fprintf(stderr, " | UDP %s:%d | stat %d ms | alpha=%.2f delta_us=%d tau_us=%d | ctrl=%s | stats -> %s:%d\n",
           cli.ip, cli.port, cli.stat_period_ms, cli.alpha, cli.delta_us, cli.tau_us,
-          cli.ctrl_addr);
+          cli.ctrl_addr, cli.stat_ip, cli.stat_port);
   fprintf(stderr, "Debug epoch stats: %s\n", cli.debug_stats ? "on" : "off");
+  if (cli.stat_id && *cli.stat_id) {
+    snprintf(g_mx_stats_module_id, sizeof(g_mx_stats_module_id), "%.*s", (int)(sizeof(g_mx_stats_module_id)-1), cli.stat_id);
+  } else {
+    snprintf(g_mx_stats_module_id, sizeof(g_mx_stats_module_id), "mx");
+  }
+
 
   uint64_t t0 = now_ms();
   uint64_t pkts = 0;
+  uint64_t bytes_forwarded = 0;
   /* Init dedup windows per TX and reset per-period stats */
   for (int t=0;t<MAX_TX_IDS;++t) seqwin_init(&SWG[t]);
   stats_reset_period(n_open);
@@ -912,6 +1010,7 @@ int main(int argc, char** argv)
         /* Optional: forward payload without trailer (trim what we actually found) */
         size_t fwd_len = v.payload_len;
         if (trailer_found > 0 && fwd_len >= trailer_found) fwd_len -= trailer_found;
+        bytes_forwarded += fwd_len;
         (void)sendto(us, v.payload, fwd_len, 0, (struct sockaddr*)&dst, sizeof(dst));
         pkts++;
       }
@@ -926,6 +1025,126 @@ stats_tick:
           if (real_delta_samples > 0) avg_real_du = (double)real_delta_sum / (double)real_delta_samples;
           if (e_delta_samples > 0)    avg_e_delta = (double)e_delta_sum / (double)e_delta_samples;
         }
+        double avg_e_epoch_glob = 0.0;
+        double avg_e_epoch_last = 0.0;
+        if (cli.debug_stats) {
+          if (g_e_epoch_samples > 0) avg_e_epoch_glob = (double)g_e_epoch_sum / (double)g_e_epoch_samples;
+          if (g_e_epoch_last_samples > 0) avg_e_epoch_last = (double)g_e_epoch_last_sum / (double)g_e_epoch_last_samples;
+        }
+
+        mx_tx_entry_t tx_entries[MAX_TX_IDS];
+        size_t tx_entry_count = 0;
+        mx_if_entry_t if_entries[MX_MAX_IF_ENTRIES];
+        size_t if_entry_count = 0;
+
+        for (int tX = 0; tX < MAX_TX_IDS; ++tX) {
+          int tx_active = (TX[tX].pkts > 0) || (TXD[tX].unique_pkts > 0);
+          if (!tx_active) continue;
+          if (tx_entry_count >= MAX_TX_IDS) continue;
+          mx_tx_entry_t* tx_entry = &tx_entries[tx_entry_count];
+          memset(tx_entry, 0, sizeof(*tx_entry));
+          tx_entry->summary.tx_id = (uint8_t)tX;
+          uint32_t packets_unique = (uint32_t)TXD[tX].unique_pkts;
+          uint32_t lost_glob = (uint32_t)TXD[tX].lost_glob;
+          tx_entry->summary.packets = packets_unique;
+          tx_entry->summary.lost = lost_glob;
+          uint64_t exp_tx_total = (uint64_t)packets_unique + (uint64_t)lost_glob;
+          double qlt_tx = (exp_tx_total > 0) ? ((double)packets_unique * 1000.0 / (double)exp_tx_total) : 1000.0;
+          tx_entry->summary.quality_permille = clamp_permille((int)lrint(qlt_tx));
+          tx_entry->summary.rate_kbps = 0;
+          int best_chain_avg = -127;
+          for (int i2 = 0; i2 < n_open; ++i2) {
+            for (int c = 0; c < RX_ANT_MAX; ++c) {
+              struct ant_stats* AS = &TXD[tX].ifs[i2].ant[c];
+              if (AS->rssi_samples > 0) {
+                int avgc = (int)((AS->rssi_sum + (AS->rssi_samples > 0 ? (AS->rssi_samples / 2) : 0)) / (AS->rssi_samples ? AS->rssi_samples : 1));
+                if (avgc > best_chain_avg) best_chain_avg = avgc;
+              }
+            }
+          }
+          tx_entry->summary.rssi_q8 = to_q8((double)best_chain_avg);
+          if (cli.debug_stats) {
+            tx_entry->summary.state_flags |= WFBX_MX_TX_FLAG_DEBUG;
+            struct epoch_stats* ES = &TXD[tX].es_overall;
+            double avg_real = (ES->real_delta_samples > 0) ? ((double)ES->real_delta_sum / (double)ES->real_delta_samples) : 0.0;
+            double avg_ed   = (ES->e_delta_samples > 0) ? ((double)ES->e_delta_sum / (double)ES->e_delta_samples) : 0.0;
+            tx_entry->summary.debug_real_delta_q4 = to_q4(avg_real);
+            tx_entry->summary.debug_e_delta_q4 = to_q4(avg_ed);
+          }
+          uint8_t iface_counter = 0;
+          for (int i2 = 0; i2 < n_open; ++i2) {
+            struct if_detail* D = &TXD[tX].ifs[i2];
+            if (D->pkts == 0 && D->es.epoch_samples == 0 && D->lost == 0) continue;
+            if (if_entry_count >= MX_MAX_IF_ENTRIES) continue;
+            mx_if_entry_t* if_entry = &if_entries[if_entry_count];
+            memset(if_entry, 0, sizeof(*if_entry));
+            if_entry->detail.tx_id = (uint8_t)tX;
+            if_entry->detail.iface_id = (uint8_t)i2;
+            if_entry->detail.packets = D->pkts;
+            if_entry->detail.lost = D->lost;
+            uint64_t exp_total = (uint64_t)D->pkts + (uint64_t)D->lost;
+            double qlt = (exp_total > 0) ? ((double)D->pkts * 1000.0 / (double)exp_total) : 1000.0;
+            if_entry->detail.quality_permille = clamp_permille((int)lrint(qlt));
+            int best_chain_avg_if = -127;
+            for (int c = 0; c < RX_ANT_MAX; ++c) {
+              struct ant_stats* AS = &D->ant[c];
+              if (AS->rssi_samples > 0) {
+                int avgc = (int)((AS->rssi_sum + (AS->rssi_samples > 0 ? (AS->rssi_samples / 2) : 0)) / (AS->rssi_samples ? AS->rssi_samples : 1));
+                if (avgc > best_chain_avg_if) best_chain_avg_if = avgc;
+              }
+            }
+            if_entry->detail.best_chain_rssi_q8 = to_q8((double)best_chain_avg_if);
+            for (int c = 0; c < RX_ANT_MAX; ++c) {
+              struct ant_stats* AS = &D->ant[c];
+              uint32_t lost_ch = PC[tX][i2][c].lost;
+              if (AS->rssi_samples == 0 && lost_ch == 0) continue;
+              if (if_entry->detail.chain_count >= RX_ANT_MAX) continue;
+              wfbx_mx_chain_detail_t* chain = &if_entry->chains[if_entry->detail.chain_count];
+              chain->chain_id = (uint8_t)c;
+              chain->ant_id = (uint8_t)AS->ant_id;
+              uint32_t exp_chain = (uint32_t)AS->rssi_samples + lost_ch;
+              double q_chain = (exp_chain > 0) ? ((double)AS->rssi_samples * 1000.0 / (double)exp_chain) : 1000.0;
+              chain->quality_permille = clamp_permille((int)lrint(q_chain));
+              double rssi_avg = (AS->rssi_samples > 0) ? ((double)AS->rssi_sum / (double)AS->rssi_samples) : 0.0;
+              chain->rssi_min_q8 = to_q8((double)AS->rssi_min);
+              chain->rssi_avg_q8 = to_q8(rssi_avg);
+              chain->rssi_max_q8 = to_q8((double)AS->rssi_max);
+              chain->packets = clamp_u16(AS->rssi_samples);
+              chain->lost = clamp_u16(lost_ch);
+              if_entry->detail.chain_count++;
+            }
+            if (if_entry->detail.chain_count > 0 || if_entry->detail.packets > 0 || if_entry->detail.lost > 0) {
+              iface_counter++;
+              if_entry_count++;
+            }
+          }
+          tx_entry->summary.if_count = iface_counter;
+          tx_entry_count++;
+        }
+
+        wfbx_mx_global_debug_t debug_payload;
+        memset(&debug_payload, 0, sizeof(debug_payload));
+        bool have_debug_payload = false;
+        if (cli.debug_stats) {
+          debug_payload.real_delta_avg_q4 = to_q4(avg_real_du);
+          debug_payload.real_delta_min_q4 = to_q4_from_i64(real_delta_min);
+          debug_payload.real_delta_max_q4 = to_q4_from_i64(real_delta_max);
+          debug_payload.real_delta_samples = (uint32_t)real_delta_samples;
+          debug_payload.e_delta_avg_q4 = to_q4(avg_e_delta);
+          debug_payload.e_delta_min_q4 = to_q4_from_i64(e_delta_min);
+          debug_payload.e_delta_max_q4 = to_q4_from_i64(e_delta_max);
+          debug_payload.e_delta_samples = (uint32_t)e_delta_samples;
+          debug_payload.e_epoch_avg_q4 = to_q4(avg_e_epoch_glob);
+          debug_payload.e_epoch_min_q4 = to_q4_from_i64(g_e_epoch_min);
+          debug_payload.e_epoch_max_q4 = to_q4_from_i64(g_e_epoch_max);
+          debug_payload.e_epoch_samples = (uint32_t)g_e_epoch_samples;
+          debug_payload.e_epoch_last_avg_q4 = to_q4(avg_e_epoch_last);
+          debug_payload.e_epoch_last_min_q4 = to_q4_from_i64(g_e_epoch_last_min);
+          debug_payload.e_epoch_last_max_q4 = to_q4_from_i64(g_e_epoch_last_max);
+          debug_payload.e_epoch_last_samples = (uint32_t)g_e_epoch_last_samples;
+          have_debug_payload = true;
+        }
+
         fprintf(stderr, "\n[MX] dt=%llu ms | pkts=%llu | ifaces=%d\n",
                 (unsigned long long)(t1-t0), (unsigned long long)pkts, n_open);
         /* Per-TX blocks first; inside each TX print per-IF details */
@@ -1000,11 +1219,11 @@ stats_tick:
           fprintf(stderr, "      e_delta: avg=%.1f min=%lld max=%lld n=%llu\n",
                   avg_e_delta, (long long)e_delta_min, (long long)e_delta_max, (unsigned long long)e_delta_samples);
           /* Global e_epoch based on current tracker: e_epoch = g_epoch_instant_us - epoch_tx_us (aggregated) */
-          double avg_e_epoch_glob = (g_e_epoch_samples>0)?((double)g_e_epoch_sum/(double)g_e_epoch_samples):0.0;
+          avg_e_epoch_glob = (g_e_epoch_samples>0)?((double)g_e_epoch_sum/(double)g_e_epoch_samples):0.0;
           fprintf(stderr, "      e_epoch(glob): avg=%.1f min=%lld max=%lld n=%llu\n",
                   avg_e_epoch_glob, (long long)g_e_epoch_min, (long long)g_e_epoch_max, (unsigned long long)g_e_epoch_samples);
           /* Global e_epoch_last: last value before switching epoch key */
-          double avg_e_epoch_last = (g_e_epoch_last_samples>0)?((double)g_e_epoch_last_sum/(double)g_e_epoch_last_samples):0.0;
+          avg_e_epoch_last = (g_e_epoch_last_samples>0)?((double)g_e_epoch_last_sum/(double)g_e_epoch_last_samples):0.0;
           fprintf(stderr, "      e_epoch_last:  avg=%.1f min=%lld max=%lld n=%llu\n",
                   avg_e_epoch_last, (long long)g_e_epoch_last_min, (long long)g_e_epoch_last_max, (unsigned long long)g_e_epoch_last_samples);
           fprintf(stderr, "      ctrl_epoch_sent=%llu\n", (unsigned long long)g_ctrl_epoch_send_period);
@@ -1012,7 +1231,128 @@ stats_tick:
         else {
           fprintf(stderr, "      ctrl_epoch_sent=%llu\n", (unsigned long long)g_ctrl_epoch_send_period);
         }
-        t0 = t1; pkts = 0;
+        uint16_t stats_flags = 0;
+        if (cli.debug_stats) stats_flags |= 0x0001;
+        if (if_entry_count > 0) stats_flags |= 0x0002;
+
+        g_mx_stats_packet_len = 0;
+        uint8_t payload[WFBX_MX_STATS_MAX_PACKET - WFBX_STATS_HEADER_SIZE];
+        size_t payload_off = 0;
+        uint16_t section_count = 0;
+        int build_failed = 0;
+
+        wfbx_mx_summary_t summary_host = {
+          .dt_ms = (uint32_t)(t1 - t0),
+          .packets_total = (uint32_t)pkts,
+          .bytes_total = (uint32_t)(bytes_forwarded > UINT32_MAX ? UINT32_MAX : bytes_forwarded),
+          .ctrl_epoch_sent = (uint32_t)g_ctrl_epoch_send_period,
+          .iface_count = (uint16_t)n_open,
+          .tx_count = (uint16_t)tx_entry_count,
+          .flags = stats_flags,
+          .reserved = 0
+        };
+
+        uint8_t summary_buf[sizeof(wfbx_mx_summary_t)];
+        if (wfbx_mx_summary_pack(summary_buf, sizeof(summary_buf), &summary_host) != 0 ||
+            append_section(payload, &payload_off, sizeof(payload), WFBX_SECTION_SUMMARY, summary_buf, (uint16_t)sizeof(summary_buf)) != 0) {
+          build_failed = 1;
+        } else {
+          section_count++;
+        }
+
+        uint8_t* tx_payload = NULL;
+        size_t tx_payload_len = tx_entry_count * sizeof(wfbx_mx_tx_summary_t);
+        if (!build_failed && tx_entry_count > 0) {
+          if (tx_payload_len > UINT16_MAX) {
+            build_failed = 1;
+          } else {
+            tx_payload = (uint8_t*)malloc(tx_payload_len);
+            if (!tx_payload) {
+              build_failed = 1;
+            } else {
+              size_t tx_offset = 0;
+              for (size_t i = 0; i < tx_entry_count; ++i) {
+                if (wfbx_mx_tx_summary_pack(tx_payload + tx_offset, tx_payload_len - tx_offset, &tx_entries[i].summary) < 0) {
+                  build_failed = 1;
+                  break;
+                }
+                tx_offset += sizeof(wfbx_mx_tx_summary_t);
+              }
+              if (!build_failed) {
+                if (append_section(payload, &payload_off, sizeof(payload), WFBX_MX_SECTION_TX_SUMMARY, tx_payload, (uint16_t)tx_offset) != 0)
+                  build_failed = 1;
+                else
+                  section_count++;
+              }
+            }
+          }
+        }
+
+        uint8_t* if_payload = NULL;
+        size_t if_payload_len = 0;
+        if (!build_failed && if_entry_count > 0) {
+          for (size_t i = 0; i < if_entry_count; ++i) {
+            if_payload_len += sizeof(wfbx_mx_if_detail_t) + if_entries[i].detail.chain_count * sizeof(wfbx_mx_chain_detail_t);
+          }
+          if (if_payload_len > UINT16_MAX) {
+            build_failed = 1;
+          } else {
+            if_payload = (uint8_t*)malloc(if_payload_len);
+            if (!if_payload) {
+              build_failed = 1;
+            } else {
+              size_t if_offset = 0;
+              for (size_t i = 0; i < if_entry_count && !build_failed; ++i) {
+                int written = wfbx_mx_if_detail_pack(if_payload + if_offset, if_payload_len - if_offset,
+                                                    &if_entries[i].detail, if_entries[i].chains);
+                if (written < 0) build_failed = 1;
+                else if_offset += (size_t)written;
+              }
+              if (!build_failed) {
+                if (append_section(payload, &payload_off, sizeof(payload), WFBX_MX_SECTION_IF_DETAIL, if_payload, (uint16_t)if_payload_len) != 0)
+                  build_failed = 1;
+                else
+                  section_count++;
+              }
+            }
+          }
+        }
+
+        if (!build_failed && have_debug_payload) {
+          uint8_t dbg_buf[sizeof(wfbx_mx_global_debug_t)];
+          if (wfbx_mx_global_debug_pack(dbg_buf, sizeof(dbg_buf), &debug_payload) != 0 ||
+              append_section(payload, &payload_off, sizeof(payload), WFBX_MX_SECTION_GLOBAL_DEBUG, dbg_buf, (uint16_t)sizeof(dbg_buf)) != 0) {
+            build_failed = 1;
+          } else {
+            section_count++;
+          }
+        }
+
+        if (tx_payload) free(tx_payload);
+        if (if_payload) free(if_payload);
+
+        if (!build_failed && payload_off + WFBX_STATS_HEADER_SIZE <= WFBX_MX_STATS_MAX_PACKET) {
+          wfbx_stats_header_t header;
+          wfbx_stats_header_init(&header, 1, WFBX_MODULE_MX, g_mx_stats_module_id,
+                                 NULL,
+                                 g_mx_stats_tick_id++, mono_us_raw(), stats_flags, section_count, (uint32_t)payload_off);
+          uint8_t header_buf[WFBX_STATS_HEADER_SIZE];
+          if (wfbx_stats_header_pack(header_buf, sizeof(header_buf), &header) == 0) {
+            memcpy(g_mx_stats_packet, header_buf, WFBX_STATS_HEADER_SIZE);
+            memcpy(g_mx_stats_packet + WFBX_STATS_HEADER_SIZE, payload, payload_off);
+            g_mx_stats_packet_len = WFBX_STATS_HEADER_SIZE + payload_off;
+            header.crc32 = wfbx_stats_crc32(g_mx_stats_packet, g_mx_stats_packet_len);
+            if (wfbx_stats_header_pack(header_buf, sizeof(header_buf), &header) == 0)
+              memcpy(g_mx_stats_packet, header_buf, WFBX_STATS_HEADER_SIZE);
+            if (stat_sock >= 0) stats_send_packet(stat_sock, &stat_addr);
+          } else {
+            g_mx_stats_packet_len = 0;
+          }
+        } else {
+          g_mx_stats_packet_len = 0;
+        }
+
+        t0 = t1; pkts = 0; bytes_forwarded = 0;
         /* Reset per-period iface/tx stats */
         stats_reset_period(n_open);
         real_delta_sum = 0; real_delta_samples = 0;
@@ -1034,6 +1374,14 @@ stats_tick:
 
   for (int i=0;i<n_open;i++) if (ph[i]) pcap_close(ph[i]);
   close(us);
+  if (stat_sock >= 0) close(stat_sock);
   if (cs >= 0) close(cs);
   return 0;
+}
+static void stats_send_packet(int sock, const struct sockaddr_in* addr)
+{
+    if (sock < 0 || !addr) return;
+    if (g_mx_stats_packet_len == 0) return;
+    (void)sendto(sock, g_mx_stats_packet, g_mx_stats_packet_len, 0,
+                 (const struct sockaddr*)addr, sizeof(*addr));
 }

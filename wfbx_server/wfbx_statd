@@ -1,119 +1,135 @@
 #!/usr/bin/env python3
 
-import json
+import atexit
+import selectors
+import signal
 import socket
 import struct
-import selectors
-import time
-import click
-import atexit
-import signal
 import sys
+from typing import Optional, Tuple
+
+import click
+
+from wfbxlib.stats import core as stats_core
 
 
-def parse_host_port(s: str):
-    host, port = s.rsplit(":", 1)
+def parse_host_port(addr: str) -> Tuple[str, int]:
+    host, port = addr.rsplit(":", 1)
     return host, int(port)
 
 
-def make_ingest_socket(bind_addr: str):
+def make_ingest_socket(bind_addr: str) -> socket.socket:
     host, port = parse_host_port(bind_addr)
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if hasattr(socket, 'SO_REUSEPORT'):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
         try:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         except OSError:
             pass
-    s.bind((host, port))
-    s.setblocking(False)
-    return s
+    sock.bind((host, port))
+    sock.setblocking(False)
+    return sock
 
 
-def make_mcast_sender(mcast_addr: str, loopback_only: bool = True):
-    m_ip, m_port = parse_host_port(mcast_addr)
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    # TTL 0: never leaves the host; keep LOOP enabled so local subscribers receive it
-    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 0)
-    s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
+def make_mcast_sender(mcast_addr: str, loopback_only: bool = True) -> Tuple[socket.socket, Tuple[str, int]]:
+    host, port = parse_host_port(mcast_addr)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 0)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
     if loopback_only:
-        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton('127.0.0.1'))
-    return s, (m_ip, m_port)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("127.0.0.1"))
+    return sock, (host, port)
 
 
-def safe_loads(b: bytes):
-    try:
-        return json.loads(b.decode('utf-8', 'replace'))
-    except Exception:
-        return None
+HOST_ID_OFFSET = 4 + 1 + 1 + 24  # magic + version + module_type + module_id
+HOST_ID_LEN = 16
+HEADER_SIZE = stats_core.HEADER_STRUCT.size
+CRC_OFFSET = HEADER_SIZE - 4
+
+
+def ensure_host_id(packet: bytes, desired_host_id: str) -> bytes:
+    if len(packet) < HEADER_SIZE:
+        return packet
+
+    host_bytes = packet[HOST_ID_OFFSET : HOST_ID_OFFSET + HOST_ID_LEN]
+    if host_bytes.rstrip(b"\0"):
+        return packet
+
+    patched = bytearray(packet)
+    encoded = desired_host_id.encode("ascii", "ignore")[:HOST_ID_LEN]
+    encoded = encoded.ljust(HOST_ID_LEN, b"\0")
+    patched[HOST_ID_OFFSET : HOST_ID_OFFSET + HOST_ID_LEN] = encoded
+
+    crc32 = struct.unpack_from(">I", packet, CRC_OFFSET)[0]
+    if crc32 != 0:
+        header = bytearray(patched[:HEADER_SIZE])
+        header[CRC_OFFSET:CRC_OFFSET + 4] = b"\0\0\0\0"
+        checksum = stats_core.compute_crc32(bytes(header) + patched[HEADER_SIZE:])
+        struct.pack_into(">I", patched, CRC_OFFSET, checksum)
+
+    return bytes(patched)
 
 
 @click.command()
-@click.option('--ingest', default='0.0.0.0:9100', show_default=True, help='UDP bind for ingest (host:port)')
-@click.option('--mcast', default='239.255.0.1:9100', show_default=True, help='Multicast fanout address (ip:port)')
-@click.option('--host_id', default='core', show_default=True, help='Host ID to inject if missing')
-@click.option('--max_len', default=8192, show_default=True, help='Max accepted datagram length (bytes)')
-def main(ingest, mcast, host_id, max_len):
-    
-    rx = None
-    tx = None
-    
-    def cleanup():
-        for s in (rx, tx):
-            try:
-                if s is not None:
-                    s.close()
-            except Exception as e:
-                print(e)
-                
-    def signal_handler(sig, frame):
+@click.option("--ingest", default="0.0.0.0:9100", show_default=True, help="UDP bind for ingest (host:port)")
+@click.option("--mcast", default="239.255.0.1:9100", show_default=True, help="Multicast fanout address (ip:port)")
+@click.option("--host_id", default="core", show_default=True, help="Host ID fallback when packet omits it")
+@click.option("--max_len", default=8192, show_default=True, help="Max accepted datagram length (bytes)")
+def main(ingest: str, mcast: str, host_id: str, max_len: int) -> None:
+    rx: Optional[socket.socket] = None
+    tx: Optional[socket.socket] = None
+
+    def cleanup() -> None:
+        for sock in (rx, tx):
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    def handle_signal(_sig, _frame) -> None:
         cleanup()
         sys.exit(0)
-        
+
     atexit.register(cleanup)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
     rx = make_ingest_socket(ingest)
     tx, tx_addr = make_mcast_sender(mcast, loopback_only=True)
-    sel = selectors.DefaultSelector()
-    sel.register(rx, selectors.EVENT_READ)
 
-    schema_default = 'wfbx.stat/1'
+    selector = selectors.DefaultSelector()
+    selector.register(rx, selectors.EVENT_READ)
 
     while True:
-        events = sel.select(timeout=1.0)
+        events = selector.select(timeout=0.1)
         if not events:
             continue
-        for key, _ in events:
-            if key.fileobj is rx:
+        for key, _mask in events:
+            if key.fileobj is not rx:
+                continue
+            while True:
                 try:
-                    data, _ = rx.recvfrom(65535)
+                    datagram, _peer = rx.recvfrom(65535)
                 except BlockingIOError:
+                    break
+                except OSError:
+                    break
+
+                if not datagram:
                     continue
-                if not data:
+                if len(datagram) > max_len:
                     continue
-                if len(data) > max_len:
-                    # drop oversized
-                    continue
-                obj = safe_loads(data)
-                if not isinstance(obj, dict):
-                    continue
-                # inject schema/host_id if missing
-                if 'schema' not in obj:
-                    obj['schema'] = schema_default
-                if 'host_id' not in obj or not obj.get('host_id'):
-                    obj['host_id'] = host_id
-                # ensure ts present
-                if 'ts' not in obj:
-                    obj['ts'] = time.time()
-                out = json.dumps(obj, separators=(',', ':')).encode('utf-8')
+
+                out_packet = ensure_host_id(datagram, host_id)
+
                 try:
-                    tx.sendto(out, tx_addr)
+                    tx.sendto(out_packet, tx_addr)
                 except OSError:
                     pass
 
 
-if __name__ == '__main__':
-    main()
 
+if __name__ == "__main__":
+    main()

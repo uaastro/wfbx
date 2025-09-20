@@ -326,6 +326,9 @@ struct cli_cfg {
   int link_id;
   int radio_port;
   int stat_period_ms;
+  const char* stat_ip;
+  int stat_port;
+  const char* stat_id;
 };
 
 static void print_help(const char* prog)
@@ -335,6 +338,9 @@ static void print_help(const char* prog)
     "Options:\n"
     "  --ip <addr>         UDP destination IP (default: %s)\n"
     "  --port <num>        UDP destination port (default: %d)\n"
+    "  --stat_ip <addr>    Stats server IP (default: 127.0.0.1)\n"
+    "  --stat_port <num>   Stats server port (default: 9601)\n"
+    "  --stat_id <name>    Stats module identifier (default: rx)\n"
     "  --tx_id <list>      Filter by transmitter IDs:\n"
     "                     'any' or '-1'               → accept all\n"
     "                      include list '1,2,5,10-12' → accept only listed IDs\n"
@@ -363,10 +369,16 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
   cfg->radio_port = 0;
   cfg->n_if = 0;
   cfg->stat_period_ms = STATS_PERIOD_MS_DEFAULT;
+  cfg->stat_ip = "127.0.0.1";
+  cfg->stat_port = 9601;
+  cfg->stat_id = "rx";
 
   static struct option longopts[] = {
     {"ip",           required_argument, 0, 0},
     {"port",         required_argument, 0, 0},
+    {"stat_ip",      required_argument, 0, 0},
+    {"stat_port",    required_argument, 0, 0},
+    {"stat_id",      required_argument, 0, 0},
     {"tx_id",        required_argument, 0, 0},
     {"link_id",      required_argument, 0, 0},
     {"radio_port",   required_argument, 0, 0},
@@ -384,6 +396,9 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
       const char* val  = optarg ? optarg : "";
       if      (strcmp(name,"ip")==0)           cfg->ip = val;
       else if (strcmp(name,"port")==0)         cfg->port = atoi(val);
+      else if (strcmp(name,"stat_ip")==0)      cfg->stat_ip = val;
+      else if (strcmp(name,"stat_port")==0)    cfg->stat_port = atoi(val);
+      else if (strcmp(name,"stat_id")==0)      cfg->stat_id = val;
       else if (strcmp(name,"tx_id")==0)        txf_parse(&cfg->txf, val);
       else if (strcmp(name,"link_id")==0)      cfg->link_id = atoi(val);
       else if (strcmp(name,"radio_port")==0)   cfg->radio_port = atoi(val);
@@ -534,10 +549,11 @@ int main(int argc, char** argv)
 
   fprintf(stderr, "RX: ");
   for (int i=0;i<n_open;i++) fprintf(stderr, "%s%s", cli.ifname[i], (i+1<n_open?", ":""));
-  fprintf(stderr, " -> UDP %s:%d | stats %d ms | filters: TX=%s LINK=%d PORT=%d\n",
+  fprintf(stderr, " -> UDP %s:%d | stats %d ms | filters: TX=%s LINK=%d PORT=%d | stats -> %s:%d id=%s\n",
           cli.ip, cli.port, cli.stat_period_ms,
           (cli.txf.mode==TXF_ANY?"any":(cli.txf.mode==TXF_INCLUDE?"include":"exclude")),
-          cli.link_id, cli.radio_port);
+          cli.link_id, cli.radio_port,
+          cli.stat_ip, cli.stat_port, cli.stat_id);
 
   /* Global period accumulators */
   uint64_t t0 = now_ms();

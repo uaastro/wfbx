@@ -158,6 +158,9 @@ static void print_help(const char* prog)
     "\nOptions (defaults in brackets):\n"
     "  --ip <addr>           UDP bind IP [%s]\n"
     "  --port <num>          UDP bind port [%d]\n"
+    "  --stat_ip <addr>      Stats server IP [127.0.0.1]\n"
+    "  --stat_port <num>     Stats server port [9601]\n"
+    "  --stat_id <name>      Stats module identifier [tx]\n"
     "  --mcs_idx <n>         HT MCS index (0..31) [%d]\n"
     "  --gi <short|long>     Guard interval [%s]\n"
     "  --bw <20|40>          Channel bandwidth (MHz) [%s]\n"
@@ -1013,6 +1016,9 @@ int main(int argc, char** argv) {
   int ldpc = 1;
   int stbc = 1;
   int group_id = 0, tx_id = 0, link_id = 0, radio_port = 0;
+  const char* stat_ip = "127.0.0.1";
+  int stat_port = 9601;
+  const char* stat_id = "tx";
   const char* mx_addr_cli = "@wfbx.mx";
 
   static struct option longopts[] = {
@@ -1024,6 +1030,9 @@ int main(int argc, char** argv) {
     {"ldpc",       required_argument, 0, 0}, /* 0 / 1 */
     {"stbc",       required_argument, 0, 0}, /* 0..3 */
     {"group_id",   required_argument, 0, 0},
+    {"stat_ip",    required_argument, 0, 0},
+    {"stat_port",  required_argument, 0, 0},
+    {"stat_id",    required_argument, 0, 0},
     {"tx_id",      required_argument, 0, 0},
     {"link_id",    required_argument, 0, 0},
     {"radio_port", required_argument, 0, 0},
@@ -1068,6 +1077,9 @@ int main(int argc, char** argv) {
       else if (strcmp(name,"ldpc")==0) ldpc = atoi(val)!=0;
       else if (strcmp(name,"stbc")==0) stbc = atoi(val);
       else if (strcmp(name,"group_id")==0) group_id = atoi(val);
+      else if (strcmp(name,"stat_ip")==0) stat_ip = val;
+      else if (strcmp(name,"stat_port")==0) stat_port = atoi(val);
+      else if (strcmp(name,"stat_id")==0) stat_id = val;
       else if (strcmp(name,"tx_id")==0)    tx_id    = atoi(val);
       else if (strcmp(name,"link_id")==0)  link_id  = atoi(val);
       else if (strcmp(name,"radio_port")==0) radio_port = atoi(val);
@@ -1167,9 +1179,10 @@ int main(int argc, char** argv) {
   pthread_mutex_unlock(&g_epoch_base.mtx);
   epoch_base_init_from_start(g_epoch_start_us);
 
-  fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d | mx=%s\n",
+  fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d | mx=%s | stats -> %s:%d id=%s\n",
           ip, port, iface, mcs_idx, gi_short?"short":"long", bw40?"40":"20",
-          ldpc, stbc, group_id, tx_id, link_id, radio_port, mx_addr_cli);
+          ldpc, stbc, group_id, tx_id, link_id, radio_port, mx_addr_cli,
+          stat_ip, stat_port, stat_id);
 
   /* Make UDP socket non-blocking */
   int nfl = fcntl(us, F_GETFL, 0); if (nfl >= 0) fcntl(us, F_SETFL, nfl | O_NONBLOCK);
@@ -1190,6 +1203,10 @@ int main(int argc, char** argv) {
   pthread_join(th_sched, NULL);
 
   if (g_ph) pcap_close(g_ph);
+  if (g_cs >= 0) {
+    close(g_cs);
+    g_cs = -1;
+  }
   close(g_usock);
   return 0;
 }

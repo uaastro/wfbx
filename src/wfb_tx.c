@@ -148,6 +148,9 @@ int main(int argc, char** argv) {
   int ldpc = 1;
   int stbc = 1;
   int group_id = 0, tx_id = 0, link_id = 0, radio_port = 0;
+  const char* stat_ip = "127.0.0.1";
+  int stat_port = 9601;
+  const char* stat_id = "tx";
 
   static struct option longopts[] = {
     {"ip",         required_argument, 0, 0},
@@ -161,6 +164,9 @@ int main(int argc, char** argv) {
     {"tx_id",      required_argument, 0, 0},
     {"link_id",    required_argument, 0, 0},
     {"radio_port", required_argument, 0, 0},
+    {"stat_ip",    required_argument, 0, 0},
+    {"stat_port",  required_argument, 0, 0},
+    {"stat_id",    required_argument, 0, 0},
     {0,0,0,0}
   };
 
@@ -190,12 +196,17 @@ int main(int argc, char** argv) {
       else if (strcmp(name,"tx_id")==0)    tx_id    = atoi(val);
       else if (strcmp(name,"link_id")==0)  link_id  = atoi(val);
       else if (strcmp(name,"radio_port")==0) radio_port = atoi(val);
+      else if (strcmp(name,"stat_ip")==0)  stat_ip = val;
+      else if (strcmp(name,"stat_port")==0) stat_port = atoi(val);
+      else if (strcmp(name,"stat_id")==0)  stat_id = val;
     }
   }
 
   if (optind >= argc) {
-    fprintf(stderr, "Usage: sudo %s [--ip 0.0.0.0] [--port 5600] [--mcs_idx N] [--gi short|long] [--bw 20|40]\n"
-                    "                [--ldpc 0|1] [--stbc 0..3] [--group_id G] [--tx_id T] [--link_id L] [--radio_port P] <wlan_iface>\n",
+    fprintf(stderr,
+            "Usage: sudo %s [--ip 0.0.0.0] [--port 5600] [--mcs_idx N] [--gi short|long] [--bw 20|40]\n"
+            "                [--ldpc 0|1] [--stbc 0..3] [--group_id G] [--tx_id T] [--link_id L] [--radio_port P]\n"
+            "                [--stat_ip 127.0.0.1] [--stat_port 9601] [--stat_id tx] <wlan_iface>\n",
             argv[0]);
     return 1;
   }
@@ -223,9 +234,10 @@ int main(int argc, char** argv) {
 
   signal(SIGINT, on_sigint);
 
-  fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d\n",
+  fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d | stats -> %s:%d id=%s\n",
           ip, port, iface, mcs_idx, gi_short?"short":"long", bw40?"40":"20",
-          ldpc, stbc, group_id, tx_id, link_id, radio_port);
+          ldpc, stbc, group_id, tx_id, link_id, radio_port,
+          stat_ip, stat_port, stat_id);
 
   uint8_t buf[MAX_UDP_PAYLOAD];
   uint16_t seq = 0;

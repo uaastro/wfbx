@@ -1,199 +1,294 @@
 #!/usr/bin/env python3
 
-import curses
-import json
-import os
+import atexit
 import selectors
+import signal
 import socket
+import struct
+import sys
 import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
 import click
+from rich.align import Align
+from rich.columns import Columns
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+from wfbxlib.stats import core as stats_core
+from wfbxlib.stats import mx as stats_mx
 
 
-def parse_addr(addr: str):
-    # Supported forms:
-    #  - "@wfbx.stat" (UDS abstract)
-    #  - "uds:@wfbx.stat"
-    #  - "udp:127.0.0.1:9100" or "127.0.0.1:9100"
-    if addr.startswith('uds:'):
-        return ('uds', addr[4:])
-    if addr.startswith('udp:'):
-        host_port = addr[4:]
-        host, port = host_port.rsplit(':', 1)
-        return ('udp', (host, int(port)))
-    # default: uds if starts with '@'
-    if addr and addr[0] == '@':
-        return ('uds', addr)
-    # else assume udp host:port
-    host, port = addr.rsplit(':', 1)
-    return ('udp', (host, int(port)))
+console = Console()
 
 
-def make_rx_socket(kind, target):
-    if kind == 'uds':
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        # abstract namespace bind: first byte NUL, then name without '@'
-        name = target[1:] if target and target[0] == '@' else target
-        bind_path = '\0' + (name or 'wfbx.stat')
-        s.bind(bind_path)
-        return s
-    else:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if hasattr(socket, 'SO_REUSEPORT'):
+@dataclass
+class ModuleRecord:
+    key: str
+    kind: str
+    header: stats_core.Header
+    summary: Optional[stats_core.Summary]
+    text_preview: Optional[str]
+    tx_entries: List[stats_mx.TxSummary]
+    if_entries: List[stats_mx.IfDetail]
+    global_debug: Optional[stats_mx.GlobalDebug]
+    last_update: float
+
+
+def create_mcast_socket(group_ip: str, port: int) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("", port))
+    except OSError:
+        sock.bind((group_ip, port))
+    mreq = struct.pack("=4sl", socket.inet_aton(group_ip), socket.INADDR_ANY)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    sock.setblocking(False)
+    return sock
+
+
+def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]]):
+    summary: Optional[stats_core.Summary] = None
+    text_preview: Optional[str] = None
+    tx_entries: List[stats_mx.TxSummary] = []
+    if_entries: List[stats_mx.IfDetail] = []
+    global_debug: Optional[stats_mx.GlobalDebug] = None
+
+    for section_type, payload in sections:
+        if section_type == stats_core.SectionType.SUMMARY:
             try:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except OSError:
-                pass
-        host, port = target
-        s.bind((host, port))
-        return s
+                summary = stats_core.Summary.unpack(payload)
+            except ValueError:
+                continue
+        elif section_type == stats_core.SectionType.TEXT_PREVIEW:
+            text_preview = payload.rstrip(b"\0").decode("utf-8", "ignore")
+        elif header.module_type == stats_core.ModuleType.MX:
+            try:
+                mx_type = stats_mx.SectionType(section_type)
+            except ValueError:
+                continue
+            if mx_type == stats_mx.SectionType.TX_SUMMARY:
+                try:
+                    tx_entries = stats_mx.unpack_tx_summary_section(payload)
+                except ValueError:
+                    tx_entries = []
+            elif mx_type == stats_mx.SectionType.IF_DETAIL:
+                try:
+                    if_entries = stats_mx.unpack_if_detail_section(payload)
+                except ValueError:
+                    if_entries = []
+            elif mx_type == stats_mx.SectionType.GLOBAL_DEBUG:
+                try:
+                    global_debug = stats_mx.GlobalDebug.unpack(payload)
+                except ValueError:
+                    global_debug = None
+
+    return summary, text_preview, tx_entries, if_entries, global_debug
 
 
-def trim(s, width):
-    if len(s) <= width:
-        return s
-    if width <= 1:
-        return s[:width]
-    return s[: width - 1] + '…'
+def detect_kind(header: stats_core.Header) -> str:
+    module_id = (header.module_id or "").lower()
+    if header.module_type == stats_core.ModuleType.MX:
+        return "mx"
+    if module_id.startswith("xtx"):
+        return "xtx"
+    if module_id.startswith("xrx"):
+        return "xrx"
+    if module_id.startswith("rxx"):
+        return "rxx"
+    if header.module_type == stats_core.ModuleType.TX:
+        return "tx"
+    if header.module_type == stats_core.ModuleType.RX:
+        return "rx"
+    return "unknown"
 
 
-def summarize_row(mod):
-    # Build a concise summary per module based on last_event and data
-    ev = mod.get('event') or ''
-    d = mod.get('data') or {}
-    t = mod.get('type') or ''
-    if ev == 'tx_stat' or (t in ('x_tx', 'tx') and d):
-        parts = []
-        for k in ('udp_rx', 'sent'):
-            if k in d:
-                parts.append(f"{k}={d[k]}")
-        if 'e_epoch_base' in d:
-            parts.append(f"e_base={d['e_epoch_base']}")
-        if 'mx_epoch_msgs' in d:
-            parts.append(f"mx_msgs={d['mx_epoch_msgs']}")
-        return ' '.join(parts)
-    if ev == 'mx_stat' or t == 'mx':
-        parts = []
-        E = d.get('e_epoch_glob') or {}
-        if 'avg' in E:
-            parts.append(f"e_glob_avg={E['avg']:.1f}")
-        if 'ctrl_epoch_sent' in d:
-            parts.append(f"sent={d['ctrl_epoch_sent']}")
-        return ' '.join(parts)
-    if ev == 'rx_stat' or t in ('x_rx', 'rx'):
-        parts = []
-        for k in ('pkts', 'kbps', 'lost'):
-            if k in d:
-                parts.append(f"{k}={d[k]}")
-        return ' '.join(parts)
-    # fallback: show up to 3 keys
-    shown = []
-    for k in list(d.keys())[:3]:
-        shown.append(f"{k}={d[k]}")
-    return ' '.join(shown)
+def build_record(datagram: bytes, now: float) -> ModuleRecord:
+    header, sections = stats_core.decode_packet(datagram, verify_crc=False)
+    summary, text_preview, tx_entries, if_entries, global_debug = parse_sections(header, sections)
+    host_id = header.host_id or "unknown"
+    module_id = header.module_id or "unknown"
+    key = f"{module_id}@{host_id}"
+    kind = detect_kind(header)
+    return ModuleRecord(
+        key=key,
+        kind=kind,
+        header=header,
+        summary=summary,
+        text_preview=text_preview,
+        tx_entries=tx_entries,
+        if_entries=if_entries,
+        global_debug=global_debug,
+        last_update=now,
+    )
+
+
+def matches_filters(record: ModuleRecord,
+                    module_id_filter: str,
+                    module_type_filter: str,
+                    host_id_filter: str) -> bool:
+    module_id = record.header.module_id or ""
+    host_id = record.header.host_id or ""
+    if module_id_filter and module_id_filter.lower() not in module_id.lower():
+        return False
+    if host_id_filter and host_id_filter.lower() not in host_id.lower():
+        return False
+    if module_type_filter:
+        mt = record.kind.lower()
+        mt_name = record.header.module_type.name.lower()
+        filt = module_type_filter.lower()
+        if filt not in mt and filt not in mt_name:
+            return False
+    return True
+
+
+def prune_stale(modules: Dict[str, ModuleRecord], now: float, idle_sec: float) -> None:
+    stale = [key for key, rec in modules.items() if now - rec.last_update > idle_sec]
+    for key in stale:
+        modules.pop(key, None)
+
+
+def render_summary_table(record: ModuleRecord) -> Table:
+    table = Table.grid(expand=True)
+    table.add_column(justify="left", style="cyan")
+    table.add_column(justify="right", style="bold")
+    table.add_row("Host", record.header.host_id or "-")
+    table.add_row("Tick", str(record.header.tick_id))
+    table.add_row("Flags", f"0x{record.header.flags:04X}")
+    if record.summary is not None:
+        summary = record.summary
+        table.add_row("Window ms", str(summary.dt_ms))
+        table.add_row("Packets", str(summary.packets_total))
+        table.add_row("Bytes", str(summary.bytes_total))
+        table.add_row("Interfaces", str(summary.iface_count))
+        table.add_row("TX count", str(summary.tx_count))
+    else:
+        table.add_row("Summary", "n/a")
+    return table
+
+
+def render_mx(record: ModuleRecord) -> Group:
+    blocks: List = [render_summary_table(record)]
+    if record.tx_entries:
+        tx_table = Table(show_header=True, header_style="magenta", expand=True, title="TX summary")
+        tx_table.add_column("TX")
+        tx_table.add_column("Packets", justify="right")
+        tx_table.add_column("Lost", justify="right")
+        tx_table.add_column("Quality %", justify="right")
+        tx_table.add_column("Rate kbps", justify="right")
+        for entry in record.tx_entries[:5]:
+            quality = f"{entry.quality_permille / 10.0:.1f}"
+            tx_table.add_row(
+                str(entry.tx_id),
+                str(entry.packets),
+                str(entry.lost),
+                quality,
+                str(entry.rate_kbps),
+            )
+        blocks.append(tx_table)
+    if record.text_preview:
+        blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
+    return Group(*blocks)
+
+
+def render_generic(record: ModuleRecord, label: str) -> Group:
+    blocks: List = [render_summary_table(record)]
+    if record.text_preview:
+        blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
+    return Group(*blocks)
+
+
+def render_module(record: ModuleRecord, now: float) -> Panel:
+    age = now - record.last_update
+    title = f"{record.header.module_id or 'unknown'} [{record.kind}]"
+    subtitle = f"age {age:0.1f}s"
+    if record.kind == "mx":
+        body = render_mx(record)
+    elif record.kind in {"rx", "xrx", "rxx"}:
+        body = render_generic(record, "rx")
+    elif record.kind in {"tx", "xtx"}:
+        body = render_generic(record, "tx")
+    else:
+        body = render_generic(record, "stat")
+    return Panel(body, title=title, subtitle=subtitle, border_style="green")
+
+
+def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
+    if not modules:
+        return Panel(Align.center(Text("Awaiting telemetry...", style="dim"), vertical="middle"), border_style="blue")
+    ordered = [modules[key] for key in sorted(modules.keys())]
+    panels = [render_module(rec, now) for rec in ordered]
+    return Panel(Columns(panels, expand=True), border_style="blue", title="wfbx_top")
 
 
 @click.command()
-@click.option('--addr', default='@wfbx.stat', help='stats bus address: uds:@name or udp:host:port (default uds:@wfbx.stat)')
-@click.option('--refresh', default=500, show_default=True, help='refresh interval (ms)')
-@click.option('--idle_ms', default=5000, show_default=True, help='evict module if not seen for this time (ms)')
-@click.option('--filter_id', default='', help='substring filter for module_id')
-@click.option('--filter_type', default='', help='substring filter for module_type')
-def main(addr, refresh, idle_ms, filter_id, filter_type):
-    kind, target = parse_addr(addr)
-    s = make_rx_socket(kind, target)
-    s.setblocking(False)
-    sel = selectors.DefaultSelector()
-    sel.register(s, selectors.EVENT_READ)
+@click.option("--ip", "mcast_ip", default="239.255.0.1", show_default=True, help="Multicast group IP")
+@click.option("--port", default=9100, type=int, show_default=True, help="Multicast group port")
+@click.option("--idle-ms", default=4000, type=int, show_default=True, help="Evict module if idle longer than this (ms)")
+@click.option("--module-id", "module_id_filter", default="", help="Substring filter for module_id")
+@click.option("--module-type", "module_type_filter", default="", help="Substring filter for module_type")
+@click.option("--host-id", "host_id_filter", default="", help="Substring filter for host_id")
+def main(mcast_ip: str,
+         port: int,
+         idle_ms: int,
+         module_id_filter: str,
+         module_type_filter: str,
+         host_id_filter: str) -> None:
+    sock: Optional[socket.socket] = None
 
-    modules = {}  # module_id -> dict
-
-    def evict_stale(now):
-        cutoff = now - (idle_ms / 1000.0)
-        stale = [m for m, v in modules.items() if v.get('ts', 0) < cutoff]
-        for m in stale:
-            modules.pop(m, None)
-
-    def handle_packet(data):
-        try:
-            msg = json.loads(data.decode('utf-8', 'replace'))
-            mid = msg.get('module_id') or 'unknown'
-            mt = msg.get('module_type') or 'unknown'
-            ev = msg.get('event') or ''
-            d = msg.get('data') or {}
-            rec = modules.get(mid) or {}
-            rec.update({
-                'type': mt,
-                'event': ev,
-                'data': d,
-                'pid': msg.get('pid'),
-                'host': msg.get('host'),
-                'ts': msg.get('ts') or time.time(),
-            })
-            modules[mid] = rec
-        except Exception:
-            # ignore malformed
-            pass
-
-    def draw(stdscr):
-        stdscr.erase()
-        H, W = stdscr.getmaxyx()
-        header = f"wfbx_top addr={addr} modules={len(modules)} filters:id='{filter_id}' type='{filter_type}'  q:quit"
-        stdscr.addnstr(0, 0, header, W - 1)
-        stdscr.hline(1, 0, '-', max(0, W - 1))
-        col_names = ["module_id", "type", "age", "event", "summary"]
-        stdscr.addnstr(2, 0, "{:<20} {:<7} {:>5} {:<10} {}".format(*col_names), W - 1)
-        stdscr.hline(3, 0, '=', max(0, W - 1))
-        now = time.time()
-        rows = H - 4
-        # filter and sort by module_id
-        items = []
-        for mid, v in modules.items():
-            if filter_id and filter_id not in mid:
-                continue
-            mt = v.get('type') or ''
-            if filter_type and filter_type not in mt:
-                continue
-            items.append((mid, v))
-        items.sort(key=lambda x: x[0])
-        for i, (mid, v) in enumerate(items[: max(0, rows)]):
-            age = max(0.0, now - (v.get('ts') or now))
-            age_s = f"{age:4.1f}s"
-            ev = v.get('event') or ''
-            summ = summarize_row(v)
-            line = "{:<20} {:<7} {:>5} {:<10} {}".format(trim(mid, 20), trim(v.get('type') or '', 7), age_s, trim(ev, 10), trim(summ, max(0, W - 48)))
-            stdscr.addnstr(4 + i, 0, line, W - 1)
-        stdscr.refresh()
-
-    def loop(stdscr):
-        stdscr.nodelay(True)
-        curses.curs_set(0)
-        next_draw = 0
-        while True:
-            now = time.time()
-            timeout = max(0.0, (next_draw - now)) if next_draw > 0 else (refresh / 1000.0)
-            events = sel.select(timeout)
-            for key, _ in events:
-                try:
-                    data = key.fileobj.recv(16384)
-                    if data:
-                        handle_packet(data)
-                except BlockingIOError:
-                    pass
-            if now >= next_draw:
-                evict_stale(now)
-                draw(stdscr)
-                next_draw = now + (refresh / 1000.0)
+    def cleanup() -> None:
+        if sock is not None:
             try:
-                ch = stdscr.getch()
-                if ch == ord('q') or ch == ord('Q'):
-                    break
+                sock.close()
             except Exception:
                 pass
 
-    curses.wrapper(loop)
+    def handle_signal(_sig, _frame) -> None:
+        cleanup()
+        sys.exit(0)
+
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    modules: Dict[str, ModuleRecord] = {}
+    idle_sec = idle_ms / 1000.0 if idle_ms > 0 else float("inf")
+
+    sock = create_mcast_socket(mcast_ip, port)
+    selector = selectors.DefaultSelector()
+    selector.register(sock, selectors.EVENT_READ)
+
+    with Live(render_dashboard(modules, time.time()), refresh_per_second=5, console=console) as live:
+        while True:
+            events = selector.select(timeout=0.5)
+            now = time.time()
+            for key, _mask in events:
+                if key.fileobj is not sock:
+                    continue
+                while True:
+                    try:
+                        datagram, _addr = sock.recvfrom(65535)
+                    except BlockingIOError:
+                        break
+                    except OSError:
+                        break
+                    if not datagram:
+                        continue
+                    try:
+                        record = build_record(datagram, now)
+                    except Exception:
+                        continue
+                    if not matches_filters(record, module_id_filter, module_type_filter, host_id_filter):
+                        continue
+                    modules[record.key] = record
+            prune_stale(modules, now, idle_sec)
+            live.update(render_dashboard(modules, now))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-
