@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <ctype.h>
+#include <strings.h>
 #include <sys/un.h>
 #include <fcntl.h>
 
@@ -496,6 +497,7 @@ struct cli_cfg {
   uint32_t epoch_len_us;    /* publish superframe length */
   uint32_t epoch_gi_us;     /* publish inter-superframe guard */
   double  d_max_km;         /* max distance (km) ⇒ tau_us */
+  int debug_stats;          /* enable extended epoch diagnostics */
 };
 
 static void print_help(const char* prog)
@@ -510,6 +512,7 @@ static void print_help(const char* prog)
          "  --ctrl <@name>      Control UDS abstract address (default: @wfbx.mx)\n"
          "  --d_max <km>        Max distance in km (sets tau_us = round(d_max*3.335641))\n"
          "  --stat_period <ms>  Stats period in milliseconds (default: %d)\n"
+         "  --debug <on|off>    Enable extended epoch diagnostics (default: off)\n"
          "  --help              Show this help and exit\n",
          prog, g_dest_ip_default, g_dest_port_default, 1000);
 }
@@ -518,6 +521,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
 {
   cfg->ip = g_dest_ip_default; cfg->port = g_dest_port_default; cfg->n_if = 0; cfg->stat_period_ms = 1000; cfg->txf.mode = TXF_ANY;
   cfg->alpha = 0.3; cfg->tau_us = 0; cfg->delta_us = 700; cfg->ctrl_addr = "@wfbx.mx"; cfg->epoch_len_us = 0; cfg->epoch_gi_us = 0; cfg->d_max_km = 0.0;
+  cfg->debug_stats = 0;
   static struct option longopts[] = {
     {"ip",           required_argument, 0, 0},
     {"port",         required_argument, 0, 0},
@@ -527,6 +531,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
     {"ctrl",         required_argument, 0, 0},
     {"d_max",        required_argument, 0, 0},
     {"stat_period",  required_argument, 0, 0},
+    {"debug",        required_argument, 0, 0},
     {"help",         no_argument,       0, 0},
     {0,0,0,0}
   };
@@ -541,6 +546,14 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
       else if (strcmp(name,"ctrl")==0)        cfg->ctrl_addr = val;
       else if (strcmp(name,"d_max")==0)       cfg->d_max_km = atof(val);
       else if (strcmp(name,"stat_period")==0) cfg->stat_period_ms = atoi(val);
+      else if (strcmp(name,"debug")==0) {
+        if (strcasecmp(val, "on") == 0 || strcmp(val, "1") == 0 || strcasecmp(val, "true") == 0)
+          cfg->debug_stats = 1;
+        else if (strcasecmp(val, "off") == 0 || strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0)
+          cfg->debug_stats = 0;
+        else
+          fprintf(stderr, "Unknown --debug value '%s' (use on/off)\n", val);
+      }
       else if (strcmp(name,"help")==0) { print_help(argv[0]); exit(0); }
     }
   }
@@ -581,6 +594,7 @@ int main(int argc, char** argv)
   fprintf(stderr, " | UDP %s:%d | stat %d ms | alpha=%.2f delta_us=%d tau_us=%d | ctrl=%s\n",
           cli.ip, cli.port, cli.stat_period_ms, cli.alpha, cli.delta_us, cli.tau_us,
           cli.ctrl_addr);
+  fprintf(stderr, "Debug epoch stats: %s\n", cli.debug_stats ? "on" : "off");
 
   uint64_t t0 = now_ms();
   uint64_t pkts = 0;
@@ -906,8 +920,12 @@ int main(int argc, char** argv)
 stats_tick:
     {
       uint64_t t1 = now_ms(); if (t1 - t0 >= (uint64_t)cli.stat_period_ms) {
-        double avg_real_du = (real_delta_samples > 0) ? ((double)real_delta_sum / (double)real_delta_samples) : 0.0;
-        double avg_e_delta = (e_delta_samples > 0) ? ((double)e_delta_sum / (double)e_delta_samples) : 0.0;
+        double avg_real_du = 0.0;
+        double avg_e_delta = 0.0;
+        if (cli.debug_stats) {
+          if (real_delta_samples > 0) avg_real_du = (double)real_delta_sum / (double)real_delta_samples;
+          if (e_delta_samples > 0)    avg_e_delta = (double)e_delta_sum / (double)e_delta_samples;
+        }
         fprintf(stderr, "\n[MX] dt=%llu ms | pkts=%llu | ifaces=%d\n",
                 (unsigned long long)(t1-t0), (unsigned long long)pkts, n_open);
         /* Per-TX blocks first; inside each TX print per-IF details */
@@ -915,9 +933,6 @@ stats_tick:
           int tx_active = (TX[tX].pkts>0) || (TXD[tX].unique_pkts>0);
           if (!tx_active) continue;
           double avg_tx_rssi = (TX[tX].rssi_samples>0) ? ((double)TX[tX].rssi_sum / (double)TX[tX].rssi_samples) : 0.0;
-          struct epoch_stats* ES = &TXD[tX].es_overall;
-          double avg_real  = (ES->real_delta_samples>0) ? ((double)ES->real_delta_sum/(double)ES->real_delta_samples) : 0.0;
-          double avg_ed    = (ES->e_delta_samples>0) ? ((double)ES->e_delta_sum/(double)ES->e_delta_samples) : 0.0;
           /* TX-level QLT: best chain avg across all IFs */
           int best_chain_avg = -127; int best_chain_valid = 0;
           for (int i2=0;i2<n_open;i2++) {
@@ -935,10 +950,14 @@ stats_tick:
           fprintf(stderr, "\n  [TX %03d] upkts=%llu lost=%u qlt=%.1f%% | RSSI min=%d avg=%.1f max=%d\n",
                   tX,(unsigned long long)TXD[tX].unique_pkts,(unsigned)TXD[tX].lost_glob,qlt_tx,
                   (int)TX[tX].rssi_min,avg_tx_rssi,(int)TX[tX].rssi_max);
-          /* Exclude epoch absolute values from stats output; keep timing error metrics only (no e_epoch here) */
-          fprintf(stderr, "      real_delta avg=%.1f min=%lld max=%lld n=%llu\n      e_delta avg=%.1f min=%lld max=%lld n=%llu\n",
-                  avg_real,(long long)ES->real_delta_min,(long long)ES->real_delta_max,(unsigned long long)ES->real_delta_samples,
-                  avg_ed,(long long)ES->e_delta_min,(long long)ES->e_delta_max,(unsigned long long)ES->e_delta_samples);
+          if (cli.debug_stats) {
+            struct epoch_stats* ES = &TXD[tX].es_overall;
+            double avg_real = (ES->real_delta_samples>0) ? ((double)ES->real_delta_sum/(double)ES->real_delta_samples) : 0.0;
+            double avg_ed   = (ES->e_delta_samples>0) ? ((double)ES->e_delta_sum/(double)ES->e_delta_samples) : 0.0;
+            fprintf(stderr, "      real_delta avg=%.1f min=%lld max=%lld n=%llu\n      e_delta avg=%.1f min=%lld max=%lld n=%llu\n",
+                    avg_real,(long long)ES->real_delta_min,(long long)ES->real_delta_max,(unsigned long long)ES->real_delta_samples,
+                    avg_ed,(long long)ES->e_delta_min,(long long)ES->e_delta_max,(unsigned long long)ES->e_delta_samples);
+          }
           /* Then per-interface detail for this TX */
           for (int i2=0;i2<n_open;i2++) {
             struct if_detail* D = &TXD[tX].ifs[i2];
@@ -964,29 +983,35 @@ stats_tick:
               fprintf(stderr, "      ANTa%02d: rssi min=%d avg=%.1f max=%d | lost=%u\n",
                       (int)AS->ant_id,(int)AS->rssi_min,av,(int)AS->rssi_max,(unsigned)AS->lost);
             }
-            /* Per-IF timing stats (exclude absolute epoch) */
-            struct epoch_stats* EI = &D->es;
-            double ar  = (EI->real_delta_samples>0)?((double)EI->real_delta_sum/(double)EI->real_delta_samples):0.0;
-            double ad  = (EI->e_delta_samples>0)?((double)EI->e_delta_sum/(double)EI->e_delta_samples):0.0;
-            fprintf(stderr, "      real_delta avg=%.1f min=%lld max=%lld n=%llu\n      e_delta avg=%.1f min=%lld max=%lld n=%llu\n",
-                    ar,(long long)EI->real_delta_min,(long long)EI->real_delta_max,(unsigned long long)EI->real_delta_samples,
-                    ad,(long long)EI->e_delta_min,(long long)EI->e_delta_max,(unsigned long long)EI->e_delta_samples);
+            if (cli.debug_stats) {
+              struct epoch_stats* EI = &D->es;
+              double ar = (EI->real_delta_samples>0)?((double)EI->real_delta_sum/(double)EI->real_delta_samples):0.0;
+              double ad = (EI->e_delta_samples>0)?((double)EI->e_delta_sum/(double)EI->e_delta_samples):0.0;
+              fprintf(stderr, "      real_delta avg=%.1f min=%lld max=%lld n=%llu\n      e_delta avg=%.1f min=%lld max=%lld n=%llu\n",
+                      ar,(long long)EI->real_delta_min,(long long)EI->real_delta_max,(unsigned long long)EI->real_delta_samples,
+                      ad,(long long)EI->e_delta_min,(long long)EI->e_delta_max,(unsigned long long)EI->e_delta_samples);
+            }
           }
         }
-        fprintf(stderr, "\n      real_delta_us: avg=%.1f min=%lld max=%lld n=%llu\n",
-                avg_real_du, (long long)real_delta_min, (long long)real_delta_max,
-                (unsigned long long)real_delta_samples);
-        fprintf(stderr, "      e_delta: avg=%.1f min=%lld max=%lld n=%llu\n",
-                avg_e_delta, (long long)e_delta_min, (long long)e_delta_max, (unsigned long long)e_delta_samples);
-        /* Global e_epoch based on current tracker: e_epoch = g_epoch_instant_us - epoch_tx_us (aggregated) */
-        double avg_e_epoch_glob = (g_e_epoch_samples>0)?((double)g_e_epoch_sum/(double)g_e_epoch_samples):0.0;
-        fprintf(stderr, "      e_epoch(glob): avg=%.1f min=%lld max=%lld n=%llu\n",
-                avg_e_epoch_glob, (long long)g_e_epoch_min, (long long)g_e_epoch_max, (unsigned long long)g_e_epoch_samples);
-        /* Global e_epoch_last: last value before switching epoch key */
-        double avg_e_epoch_last = (g_e_epoch_last_samples>0)?((double)g_e_epoch_last_sum/(double)g_e_epoch_last_samples):0.0;
-        fprintf(stderr, "      e_epoch_last:  avg=%.1f min=%lld max=%lld n=%llu\n",
-                avg_e_epoch_last, (long long)g_e_epoch_last_min, (long long)g_e_epoch_last_max, (unsigned long long)g_e_epoch_last_samples);
-        fprintf(stderr, "      ctrl_epoch_sent=%llu\n", (unsigned long long)g_ctrl_epoch_send_period);
+        if (cli.debug_stats) {
+          fprintf(stderr, "\n      real_delta_us: avg=%.1f min=%lld max=%lld n=%llu\n",
+                  avg_real_du, (long long)real_delta_min, (long long)real_delta_max,
+                  (unsigned long long)real_delta_samples);
+          fprintf(stderr, "      e_delta: avg=%.1f min=%lld max=%lld n=%llu\n",
+                  avg_e_delta, (long long)e_delta_min, (long long)e_delta_max, (unsigned long long)e_delta_samples);
+          /* Global e_epoch based on current tracker: e_epoch = g_epoch_instant_us - epoch_tx_us (aggregated) */
+          double avg_e_epoch_glob = (g_e_epoch_samples>0)?((double)g_e_epoch_sum/(double)g_e_epoch_samples):0.0;
+          fprintf(stderr, "      e_epoch(glob): avg=%.1f min=%lld max=%lld n=%llu\n",
+                  avg_e_epoch_glob, (long long)g_e_epoch_min, (long long)g_e_epoch_max, (unsigned long long)g_e_epoch_samples);
+          /* Global e_epoch_last: last value before switching epoch key */
+          double avg_e_epoch_last = (g_e_epoch_last_samples>0)?((double)g_e_epoch_last_sum/(double)g_e_epoch_last_samples):0.0;
+          fprintf(stderr, "      e_epoch_last:  avg=%.1f min=%lld max=%lld n=%llu\n",
+                  avg_e_epoch_last, (long long)g_e_epoch_last_min, (long long)g_e_epoch_last_max, (unsigned long long)g_e_epoch_last_samples);
+          fprintf(stderr, "      ctrl_epoch_sent=%llu\n", (unsigned long long)g_ctrl_epoch_send_period);
+        }
+        else {
+          fprintf(stderr, "      ctrl_epoch_sent=%llu\n", (unsigned long long)g_ctrl_epoch_send_period);
+        }
         t0 = t1; pkts = 0;
         /* Reset per-period iface/tx stats */
         stats_reset_period(n_open);
@@ -1009,5 +1034,6 @@ stats_tick:
 
   for (int i=0;i<n_open;i++) if (ph[i]) pcap_close(ph[i]);
   close(us);
+  if (cs >= 0) close(cs);
   return 0;
 }
