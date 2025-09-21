@@ -226,6 +226,16 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
     return Panel(Columns(panels, expand=True), border_style="blue", title="wfbx_top")
 
 
+def render_debug_panel(total_packets: int, filtered_packets: int, active_modules: int) -> Panel:
+    table = Table.grid(expand=True)
+    table.add_column(justify="left", style="yellow")
+    table.add_column(justify="right", style="bold")
+    table.add_row("Packets processed", str(total_packets))
+    table.add_row("Filtered out", str(filtered_packets))
+    table.add_row("Active modules", str(active_modules))
+    return Panel(table, title="debug", border_style="magenta")
+
+
 @click.command()
 @click.option("--ip", "mcast_ip", default="239.255.0.1", show_default=True, help="Multicast group IP")
 @click.option("--port", default=9100, type=int, show_default=True, help="Multicast group port")
@@ -263,6 +273,9 @@ def main(mcast_ip: str,
     selector = selectors.DefaultSelector()
     selector.register(sock, selectors.EVENT_READ)
 
+    total_packets = 0
+    filtered_packets = 0
+
     with Live(render_dashboard(modules, time.time()), refresh_per_second=5, console=console) as live:
         while True:
             events = selector.select(timeout=0.5)
@@ -279,15 +292,19 @@ def main(mcast_ip: str,
                         break
                     if not datagram:
                         continue
+                    total_packets += 1
                     try:
                         record = build_record(datagram, now)
                     except Exception:
                         continue
                     if not matches_filters(record, module_id_filter, module_type_filter, host_id_filter):
+                        filtered_packets += 1
                         continue
                     modules[record.key] = record
             prune_stale(modules, now, idle_sec)
-            live.update(render_dashboard(modules, now))
+            dashboard = render_dashboard(modules, now)
+            debug_panel = render_debug_panel(total_packets, filtered_packets, len(modules))
+            live.update(Columns([dashboard, debug_panel], expand=True))
 
 
 if __name__ == "__main__":
