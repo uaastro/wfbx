@@ -666,7 +666,12 @@ int main(int argc, char** argv)
       fprintf(stderr, "inet_aton failed for stats server %s\n", cli.stat_ip);
       close(stat_sock);
       stat_sock = -1;
+    } else {
+      fprintf(stderr, "[STATS] MX stats socket created -> %s:%d (fd=%d)\n",
+              cli.stat_ip, cli.stat_port, stat_sock);
     }
+  } else {
+    perror("stats socket");
   }
 
   /* Open PCAP for each interface */
@@ -1251,10 +1256,13 @@ stats_tick:
         };
 
         uint8_t summary_buf[sizeof(wfbx_mx_summary_t)];
-        if (wfbx_mx_summary_pack(summary_buf, sizeof(summary_buf), &summary_host) != 0 ||
+        int summary_sz = wfbx_mx_summary_pack(summary_buf, sizeof(summary_buf), &summary_host);
+        if (summary_sz <= 0 ||
             append_section(payload, &payload_off, sizeof(payload), WFBX_SECTION_SUMMARY, summary_buf, (uint16_t)sizeof(summary_buf)) != 0) {
+          fprintf(stderr, "[STATS] summary append failed (size=%d)\n", summary_sz);
           build_failed = 1;
         } else {
+          fprintf(stderr, "[STATS] summary appended size=%d payload_off=%zu\n", summary_sz, payload_off);
           section_count++;
         }
 
@@ -1277,10 +1285,13 @@ stats_tick:
                 tx_offset += sizeof(wfbx_mx_tx_summary_t);
               }
               if (!build_failed) {
-                if (append_section(payload, &payload_off, sizeof(payload), WFBX_MX_SECTION_TX_SUMMARY, tx_payload, (uint16_t)tx_offset) != 0)
+                if (append_section(payload, &payload_off, sizeof(payload), WFBX_MX_SECTION_TX_SUMMARY, tx_payload, (uint16_t)tx_offset) != 0) {
+                  fprintf(stderr, "[STATS] TX summary append failed (tx_offset=%zu)\n", tx_offset);
                   build_failed = 1;
-                else
+                } else {
+                  fprintf(stderr, "[STATS] TX summary appended chains=%zu payload_off=%zu\n", tx_entry_count, payload_off);
                   section_count++;
+                }
               }
             }
           }
@@ -1307,10 +1318,13 @@ stats_tick:
                 else if_offset += (size_t)written;
               }
               if (!build_failed) {
-                if (append_section(payload, &payload_off, sizeof(payload), WFBX_MX_SECTION_IF_DETAIL, if_payload, (uint16_t)if_payload_len) != 0)
+                if (append_section(payload, &payload_off, sizeof(payload), WFBX_MX_SECTION_IF_DETAIL, if_payload, (uint16_t)if_payload_len) != 0) {
+                  fprintf(stderr, "[STATS] IF detail append failed (len=%zu)\n", if_payload_len);
                   build_failed = 1;
-                else
+                } else {
+                  fprintf(stderr, "[STATS] IF detail appended count=%zu payload_off=%zu\n", if_entry_count, payload_off);
                   section_count++;
+                }
               }
             }
           }
@@ -1320,8 +1334,10 @@ stats_tick:
           uint8_t dbg_buf[sizeof(wfbx_mx_global_debug_t)];
           if (wfbx_mx_global_debug_pack(dbg_buf, sizeof(dbg_buf), &debug_payload) != 0 ||
               append_section(payload, &payload_off, sizeof(payload), WFBX_MX_SECTION_GLOBAL_DEBUG, dbg_buf, (uint16_t)sizeof(dbg_buf)) != 0) {
+            fprintf(stderr, "[STATS] debug section append failed\n");
             build_failed = 1;
           } else {
+            fprintf(stderr, "[STATS] debug section appended payload_off=%zu\n", payload_off);
             section_count++;
           }
         }
@@ -1342,11 +1358,18 @@ stats_tick:
             header.crc32 = wfbx_stats_crc32(g_mx_stats_packet, g_mx_stats_packet_len);
             if (wfbx_stats_header_pack(header_buf, sizeof(header_buf), &header) == 0)
               memcpy(g_mx_stats_packet, header_buf, WFBX_STATS_HEADER_SIZE);
-            if (stat_sock >= 0) stats_send_packet(stat_sock, &stat_addr);
+            fprintf(stderr, "[STATS] packet ready len=%zu sections=%u\n", g_mx_stats_packet_len, section_count);
+            if (stat_sock >= 0) {
+              stats_send_packet(stat_sock, &stat_addr);
+            } else {
+              fprintf(stderr, "[STATS] stat_sock < 0, skip send\n");
+            }
           } else {
             g_mx_stats_packet_len = 0;
           }
         } else {
+          if (build_failed) fprintf(stderr, "[STATS] build_failed, skipping send\n");
+          else fprintf(stderr, "[STATS] packet too large (%zu)\n", payload_off + WFBX_STATS_HEADER_SIZE);
           g_mx_stats_packet_len = 0;
         }
 
@@ -1380,6 +1403,17 @@ static void stats_send_packet(int sock, const struct sockaddr_in* addr)
 {
     if (sock < 0 || !addr) return;
     if (g_mx_stats_packet_len == 0) return;
-    (void)sendto(sock, g_mx_stats_packet, g_mx_stats_packet_len, 0,
-                 (const struct sockaddr*)addr, sizeof(*addr));
+    char ipbuf[INET_ADDRSTRLEN];
+    const char* ip = inet_ntop(AF_INET, &addr->sin_addr, ipbuf, sizeof(ipbuf));
+    if (!ip) ip = "?";
+    ssize_t sent = sendto(sock, g_mx_stats_packet, g_mx_stats_packet_len, 0,
+                          (const struct sockaddr*)addr, sizeof(*addr));
+    if (sent < 0) {
+        perror("stats sendto");
+        fprintf(stderr, "[STATS] sendto failed len=%zu dest=%s:%d\n",
+                g_mx_stats_packet_len, ip, ntohs(addr->sin_port));
+    } else {
+        fprintf(stderr, "[STATS] sendto ok sent=%zd len=%zu dest=%s:%d\n",
+                sent, g_mx_stats_packet_len, ip, ntohs(addr->sin_port));
+    }
 }
