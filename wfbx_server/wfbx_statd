@@ -42,6 +42,14 @@ def make_mcast_sender(mcast_addr: str, loopback_only: bool = True) -> Tuple[sock
     return sock, (host, port)
 
 
+def log_block(*messages: str) -> None:
+    print("#--- STATD LOG ---")
+    for msg in messages:
+        print(msg)
+    print("#--- /STATD LOG ---")
+    sys.stdout.flush()
+
+
 HOST_ID_OFFSET = 4 + 1 + 1 + 24  # magic + version + module_type + module_id
 HOST_ID_LEN = 16
 HEADER_SIZE = stats_core.HEADER_STRUCT.size
@@ -97,7 +105,9 @@ def main(ingest: str, mcast: str, host_id: str, max_len: int) -> None:
     signal.signal(signal.SIGTERM, handle_signal)
 
     rx = make_ingest_socket(ingest)
+    log_block(f"[STATD] ingest socket bound to {ingest}")
     tx, tx_addr = make_mcast_sender(mcast, loopback_only=True)
+    log_block(f"[STATD] multicast sender ready -> {tx_addr[0]}:{tx_addr[1]}")
 
     selector = selectors.DefaultSelector()
     selector.register(rx, selectors.EVENT_READ)
@@ -115,18 +125,25 @@ def main(ingest: str, mcast: str, host_id: str, max_len: int) -> None:
                 except BlockingIOError:
                     break
                 except OSError:
+                    log_block("[STATD] recvfrom encountered OSError; skipping")
                     break
 
                 if not datagram:
                     continue
                 if len(datagram) > max_len:
+                    log_block(f"[STATD] dropped packet len={len(datagram)} > max_len={max_len}")
                     continue
 
+                log_block(f"[STATD] received packet len={len(datagram)}")
                 out_packet = ensure_host_id(datagram, host_id)
+                if out_packet is not datagram:
+                    log_block("[STATD] host_id was injected into packet")
 
                 try:
                     tx.sendto(out_packet, tx_addr)
-                except OSError:
+                    log_block(f"[STATD] forwarded packet len={len(out_packet)} -> {tx_addr[0]}:{tx_addr[1]}")
+                except OSError as exc:
+                    log_block(f"[STATD] sendto error: {exc}")
                     pass
 
 
