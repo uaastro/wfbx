@@ -109,6 +109,8 @@ static size_t g_mx_stats_packet_len = 0;
 static uint32_t g_mx_stats_tick_id = 0;
 static char g_mx_stats_module_id[24] = "mx";
 
+static void stats_send_packet(int sock, const struct sockaddr_in* addr);
+
 typedef struct {
     wfbx_mx_tx_summary_t summary;
 } mx_tx_entry_t;
@@ -1096,7 +1098,7 @@ stats_tick:
             if_entry->detail.best_chain_rssi_q8 = to_q8((double)best_chain_avg_if);
             for (int c = 0; c < RX_ANT_MAX; ++c) {
               struct ant_stats* AS = &D->ant[c];
-              uint32_t lost_ch = PC[tX][i2][c].lost;
+              uint32_t lost_ch = AS->lost;
               if (AS->rssi_samples == 0 && lost_ch == 0) continue;
               if (if_entry->detail.chain_count >= RX_ANT_MAX) continue;
               wfbx_mx_chain_detail_t* chain = &if_entry->chains[if_entry->detail.chain_count];
