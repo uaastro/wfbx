@@ -32,12 +32,12 @@ class Header:
     version: int
     module_type: ModuleType
     module_id: str
-    host_id: str = ""
     tick_id: int
     timestamp_us: int
     flags: int
     section_count: int
     payload_len: int
+    host_id: str = ""
     crc32: int = 0
 
     def pack(self) -> bytes:
