@@ -11,28 +11,28 @@ pip install pymavlink
 pip install zfec
 
 # Build
-build.sh
+./build.sh
 
 # Install
-
-cp -r ./wfbx_server /usr/sbin/
+mkdir -p /usr/sbin/wfbx
+cp -r ./wfbx_server/* /usr/sbin/wfbx/
 cp ./wfbx_server/wfbx.service /etc/systemd/system/
 
 # Create key and copy to right location
 #./wfb_keygen
 #cp ./cfg/*.key /etc/
 
-cp ./bin/wfb_tx /usr/sbin/wfbx_server/
-cp ./bin/wfb_rx /usr/sbin/wfbx_server/
-cp ./bin/wfbx_tx /usr/sbin/wfbx_server/
-cp ./bin/wfbx_rx /usr/sbin/wfbx_server/
-cp ./bin/wfbx_mx /usr/sbin/wfbx_server/
+cp -r ./bin/* /usr/sbin/wfbx/
+#cp ./bin/wfb_rx /usr/sbin/wfbx_server/
+#cp ./bin/wfbx_tx /usr/sbin/wfbx_server/
+#cp ./bin/wfbx_rx /usr/sbin/wfbx_server/
+#cp ./bin/wfbx_mx /usr/sbin/wfbx_server/
 #cp ./bin/wfbx_keygen /usr/sbin/wfbx_server/
 
 #/usr/sbin/wfbx_server/add_wlan wlx*
 
 cat <<EOF >> /etc/bash.bashrc
-export PATH=\$PATH:/usr/sbin/wfbx_server
+export PATH=\$PATH:/usr/sbin/wfbx
 EOF
 
 # Start wfb_server service

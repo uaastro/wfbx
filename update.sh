@@ -1,15 +1,16 @@
 #!/bin/bash
-set -euo pipefail
+git pull
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_DIR="$SCRIPT_DIR/bin"
+./build.sh
 
-if [ -d "$BIN_DIR" ]; then
-  rm -rf "$BIN_DIR"/*
-fi
+#mkdir -p /usr/sbin/wfbx
+cp -r ./wfbx_server/* /usr/sbin/wfbx/
+cp -r ./bin/* /usr/sbin/wfbx/
+cp ./wfbx_server/wfbx.service /etc/systemd/system/
 
-# Ensure repository is up to date
-git -C "$SCRIPT_DIR" fetch --all --prune
+# Start wfb_server service
+systemctl daemon-reload
+systemctl enable wfbx.service
+systemctl start wfbx.service
+systemctl status wfbx.service
 
-# Rebuild binaries
-"$SCRIPT_DIR/build.sh"
