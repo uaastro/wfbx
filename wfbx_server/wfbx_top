@@ -46,8 +46,18 @@ def create_mcast_socket(group_ip: str, port: int) -> socket.socket:
         sock.bind(("", port))
     except OSError:
         sock.bind((group_ip, port))
-    mreq = struct.pack("=4sl", socket.inet_aton(group_ip), socket.INADDR_ANY)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    group_bin = socket.inet_aton(group_ip)
+    memberships = [socket.INADDR_ANY]
+    try:
+        memberships.append(struct.unpack("=l", socket.inet_aton("127.0.0.1"))[0])
+    except OSError:
+        pass
+    for iface in memberships:
+        mreq = struct.pack("=4sl", group_bin, iface)
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        except OSError:
+            continue
     sock.setblocking(False)
     return sock
 

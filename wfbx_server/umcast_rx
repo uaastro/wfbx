@@ -22,9 +22,24 @@ def join_multicast_group(group_ip: str, port: int, iface_ip: Optional[str]) -> s
     sock.bind(("", port))
 
     group_bin = socket.inet_aton(group_ip)
-    iface_bin = socket.inet_aton(iface_ip) if iface_ip else struct.pack("=I", socket.INADDR_ANY)
-    mreq = group_bin + iface_bin
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    interfaces = []
+    if iface_ip:
+        interfaces.append(iface_ip)
+    else:
+        interfaces.append("0.0.0.0")  # INADDR_ANY
+        interfaces.append("127.0.0.1")  # ensure loopback reception when stats originate locally
+
+    for if_ip in interfaces:
+        iface_bin = socket.inet_aton(if_ip)
+        mreq = group_bin + iface_bin
+        try:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        except OSError as exc:
+            # If joining with INADDR_ANY fails but a specific interface succeeds, that's fine.
+            if iface_ip:
+                raise
+            else:
+                continue
     sock.setblocking(False)
     return sock
 
