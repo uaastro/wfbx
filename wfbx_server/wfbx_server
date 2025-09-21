@@ -299,7 +299,7 @@ def main(conf):
                         "--delta_us", options['mx_delta_us'],
                         "--ctrl", options['mx_ctrl'],
                         "--d_max", options['mx_d_max'],
-                        "--stat_period", options['mx_stat_period']]
+                        "--stat_period", options['mx_stat_period']] + wlans
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
@@ -334,7 +334,7 @@ def main(conf):
                         "--prewake_q", options['xtx_prewake_q'],
                         "--prewake_min", options['xtx_prewake_min'],
                         "--stat_period", options['xtx_stat_period'],
-                        "--epoch_sync", options['xtx_epoch_sync']]
+                        "--epoch_sync", options['xtx_epoch_sync']] + wlans
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
@@ -350,7 +350,7 @@ def main(conf):
                         "--tx_id", options['xrx_tx_id'],
                         "--link_id", options['xrx_link_id'],
                         "--radio_port", options['xrx_radio_port'],
-                        "--stat_period", options['xrx_stat_period']]
+                        "--stat_period", options['xrx_stat_period']] + wlans
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
@@ -371,7 +371,7 @@ def main(conf):
                         "--group_id", options['tx_group_id'],
                         "--tx_id", options['tx_tx_id'],
                         "--link_id", options['tx_link_id'],
-                        "--radio_port", options['tx_radio_port']]
+                        "--radio_port", options['tx_radio_port']] + wlans
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
@@ -387,7 +387,7 @@ def main(conf):
                         "--tx_id", options['rx_tx_id'],
                         "--link_id", options['rx_link_id'],
                         "--radio_port", options['rx_radio_port'],
-                        "--stat_period", options['rx_stat_period']]
+                        "--stat_period", options['rx_stat_period']] + wlans
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
