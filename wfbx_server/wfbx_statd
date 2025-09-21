@@ -75,7 +75,7 @@ def ensure_host_id(packet: bytes, desired_host_id: str) -> bytes:
 @click.option("--ingest", default="0.0.0.0:9601", show_default=True, help="UDP bind for ingest (host:port)")
 @click.option("--mcast", default="239.255.0.1:9100", show_default=True, help="Multicast fanout address (ip:port)")
 @click.option("--host_id", default="core", show_default=True, help="Host ID fallback when packet omits it")
-@click.option("--max_len", default=8192, show_default=True, help="Max accepted datagram length (bytes)")
+@click.option("--max_len", default=1450, show_default=True, help="Max accepted datagram length (bytes)")
 def main(ingest: str, mcast: str, host_id: str, max_len: int) -> None:
     rx: Optional[socket.socket] = None
     tx: Optional[socket.socket] = None
