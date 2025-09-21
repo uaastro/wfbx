@@ -69,10 +69,10 @@ def main(ip, port,mpksize,mode):
         def fmt_delay(value):
             return "n/a" if value is None else f"{value * 1000:.2f}"
         table.add_row(
-            f"[bold]^X[/] E[yellow]x[/]it seq:{sequence} pkt:{pkt} pkt/s:{pkts} qlt:{quality:.1f}% "
-            f"lostΔ:{lost_period} lostΣ:{lost_total} bw:{bitrate_kbps:.2f} kbps ia:{interval_ms:.2f} ms "
-            f"delay(avg/min/max/cur):{fmt_delay(delay_avg)}/{fmt_delay(delay_min)}/{fmt_delay(delay_max)}/{fmt_delay(delay_current)} ms "
-            f"pk_size:[green]{pksize}[/] bytes"
+            f"seq:{sequence} pkt:{pkt} pkt/s:{pkts} qlt:{quality:.1f}% "
+            f"lostΔ:{lost_period} lostΣ:{lost_total} bitrate:{bitrate_kbps:.2f} kbps int:{interval_ms:.2f} ms "
+            #f"delay(avg/min/max/cur):{fmt_delay(delay_avg)}/{fmt_delay(delay_min)}/{fmt_delay(delay_max)}/{fmt_delay(delay_current)} ms "
+            f"pk_size:{pksize} bytes"
         )
         return table
 
