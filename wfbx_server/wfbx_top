@@ -22,9 +22,7 @@ from rich.text import Text
 from wfbxlib.stats import core as stats_core
 from wfbxlib.stats import mx as stats_mx
 
-
 console = Console()
-
 
 @dataclass
 class ModuleRecord:
