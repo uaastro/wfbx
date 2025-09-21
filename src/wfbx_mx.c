@@ -559,7 +559,6 @@ struct cli_cfg {
   int n_if; const char* ifname[MAX_IFS];
   const char* ip; int port; struct txid_filter txf; int stat_period_ms;
   /* Mesh time sync params */
-  double alpha;    /* EMA coefficient */
   int    tau_us;   /* propagation (us) */
   int    delta_us; /* stack latency (us) */
   /* Control channel */
@@ -583,8 +582,7 @@ static void print_help(const char* prog)
          "  --stat_port <num>   Stats server port (default: 9601)\n"
          "  --stat_id <name>    Stats module identifier (default: mx)\n"
          "  --tx_id <list>      Filter by TX IDs: 'any' | '1,2,10-12' | '!3,7' (default: any)\n"
-         "  --alpha <0..1>      EMA coefficient for T_epoch (default: 0.3)\n"
-         "  --delta_us <num>    Stack latency in us (default: 1500)\n"
+         "  --delta_us <num>    Stack latency in us (default: 700)\n"
          "  --ctrl <@name>      Control UDS abstract address (default: @wfbx.mx)\n"
          "  --d_max <km>        Max distance in km (sets tau_us = round(d_max*3.335641))\n"
          "  --stat_period <ms>  Stats period in milliseconds (default: %d)\n"
@@ -597,7 +595,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
 {
   cfg->ip = g_dest_ip_default; cfg->port = g_dest_port_default; cfg->n_if = 0; cfg->stat_period_ms = 1000; cfg->txf.mode = TXF_ANY;
   cfg->stat_ip = "127.0.0.1"; cfg->stat_port = 9601; cfg->stat_id = NULL;
-  cfg->alpha = 0.3; cfg->tau_us = 0; cfg->delta_us = 700; cfg->ctrl_addr = "@wfbx.mx"; cfg->epoch_len_us = 0; cfg->epoch_gi_us = 0; cfg->d_max_km = 0.0;
+  cfg->tau_us = 0; cfg->delta_us = 700; cfg->ctrl_addr = "@wfbx.mx"; cfg->epoch_len_us = 0; cfg->epoch_gi_us = 0; cfg->d_max_km = 0.0;
   cfg->debug_stats = 0;
   static struct option longopts[] = {
     {"ip",           required_argument, 0, 0},
@@ -606,7 +604,6 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
     {"stat_ip",     required_argument, 0, 0},
     {"stat_port",   required_argument, 0, 0},
     {"stat_id",     required_argument, 0, 0},
-    {"alpha",        required_argument, 0, 0},
     {"delta_us",     required_argument, 0, 0},
     {"ctrl",         required_argument, 0, 0},
     {"d_max",        required_argument, 0, 0},
@@ -624,7 +621,6 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
       else if (strcmp(name,"stat_ip")==0)     cfg->stat_ip = val;
       else if (strcmp(name,"stat_port")==0)   cfg->stat_port = atoi(val);
       else if (strcmp(name,"stat_id")==0)     cfg->stat_id = val;
-      else if (strcmp(name,"alpha")==0)       cfg->alpha = atof(val);
       else if (strcmp(name,"delta_us")==0)    cfg->delta_us = atoi(val);
       else if (strcmp(name,"ctrl")==0)        cfg->ctrl_addr = val;
       else if (strcmp(name,"d_max")==0)       cfg->d_max_km = atof(val);
@@ -684,8 +680,8 @@ int main(int argc, char** argv)
   if (n_open == 0) { fprintf(stderr, "No usable interfaces opened.\n"); return 1; }
 
   fprintf(stderr, "MX RX on: "); for (int i=0;i<n_open;i++) fprintf(stderr, "%s%s", cli.ifname[i], (i+1<n_open?", ":""));
-  fprintf(stderr, " | UDP %s:%d | stat %d ms | alpha=%.2f delta_us=%d tau_us=%d | ctrl=%s | stats -> %s:%d\n",
-          cli.ip, cli.port, cli.stat_period_ms, cli.alpha, cli.delta_us, cli.tau_us,
+  fprintf(stderr, " | UDP %s:%d | stat %d ms | delta_us=%d tau_us=%d | ctrl=%s | stats -> %s:%d\n",
+          cli.ip, cli.port, cli.stat_period_ms, cli.delta_us, cli.tau_us,
           cli.ctrl_addr, cli.stat_ip, cli.stat_port);
   fprintf(stderr, "Debug epoch stats: %s\n", cli.debug_stats ? "on" : "off");
   if (cli.stat_id && *cli.stat_id) {

@@ -295,18 +295,20 @@ def main(conf):
                         "--ip", options['mx_ip'],
                         "--port", options['mx_port'],
                         "--tx_id", options['mx_tx_id'],
-                        "--alpha", options['mx_alpha'],
                         "--delta_us", options['mx_delta_us'],
                         "--ctrl", options['mx_ctrl'],
                         "--d_max", options['mx_d_max'],
-                        "--stat_period", options['mx_stat_period']] + wlans
+                        "--stat_period", options['mx_stat_period'],
+                        "--stat_ip", options['mx_stat_ip'],
+                        "--stat_port", options['mx_stat_port'],
+                        "--stat_id", section] + wlans
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:4] == 'x_tx':
+            elif section[:3] == 'xtx':
                 # wfbx_tx
                 options = config[section]
                 argv = [wfbx_server_dir + "wfbx_tx",
@@ -333,6 +335,9 @@ def main(conf):
                         "--send_gi", options['xtx_send_gi'],
                         "--prewake_q", options['xtx_prewake_q'],
                         "--prewake_min", options['xtx_prewake_min'],
+                        "--stat_ip", options['xtx_stat_ip'],
+                        "--stat_port", options['xtx_stat_port'],
+                        "--stat_id", section,
                         "--stat_period", options['xtx_stat_period'],
                         "--epoch_sync", options['xtx_epoch_sync']] + wlans
                 log_mode = options.get('log', defaults.get('log', 'off'))
@@ -341,7 +346,7 @@ def main(conf):
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:4] == 'x_rx':
+            elif section[:3] == 'xrx':
                 # wfbx_rx
                 options = config[section]
                 argv = [wfbx_server_dir + "wfbx_rx",
@@ -350,6 +355,9 @@ def main(conf):
                         "--tx_id", options['xrx_tx_id'],
                         "--link_id", options['xrx_link_id'],
                         "--radio_port", options['xrx_radio_port'],
+                        "--stat_ip", options['xrx_stat_ip'],
+                        "--stat_port", options['xrx_stat_port'],
+                        "--stat_id", section,
                         "--stat_period", options['xrx_stat_period']] + wlans
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
@@ -371,7 +379,10 @@ def main(conf):
                         "--group_id", options['tx_group_id'],
                         "--tx_id", options['tx_tx_id'],
                         "--link_id", options['tx_link_id'],
-                        "--radio_port", options['tx_radio_port']] + wlans
+                        "--radio_port", options['tx_radio_port'],
+                        "--stat_ip", options['tx_stat_ip'],
+                        "--stat_port", options['tx_stat_port'],
+                        "--stat_id", section] + wlans
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
@@ -387,6 +398,9 @@ def main(conf):
                         "--tx_id", options['rx_tx_id'],
                         "--link_id", options['rx_link_id'],
                         "--radio_port", options['rx_radio_port'],
+                        "--stat_ip", options['rx_stat_ip'],
+                        "--stat_port", options['rx_stat_port'],
+                        "--stat_id", section,
                         "--stat_period", options['rx_stat_period']] + wlans
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
