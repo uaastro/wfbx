@@ -208,7 +208,7 @@ def render_mx(record: ModuleRecord) -> Group:
             blocks.append(Text(line, style="magenta"))
 
             # Antenna-level detail for this TX
-            chain_rows: List[Tuple[str, ...]] = []
+            chain_rows: List[List[object]] = []
             for if_entry in record.if_entries:
                 if if_entry.tx_id != entry.tx_id:
                     continue
@@ -217,15 +217,15 @@ def render_mx(record: ModuleRecord) -> Group:
                     chain_quality = chain.quality_permille / 10.0
                     chain_rssi = chain.rssi_avg_q8 / 256.0
                     chain_rows.append(
-                        (
+                        [
                             f"{iface_id}",
-                            f"{chain.chain_id}",
                             f"{chain.ant_id}",
                             f"{chain.packets}",
                             f"{chain.lost}",
                             f"{chain_rssi:.1f}",
+                            render_signal_bar(chain_rssi),
                             f"{chain_quality:.1f}"
-                        )
+                        ]
                     )
 
             if chain_rows:
@@ -237,11 +237,11 @@ def render_mx(record: ModuleRecord) -> Group:
                     padding=(0, 1),
                 )
                 chain_table.add_column("if", justify="right")
-                chain_table.add_column("chain", justify="right")
                 chain_table.add_column("ant", justify="right")
                 chain_table.add_column("pkts", justify="right")
                 chain_table.add_column("lost", justify="right")
                 chain_table.add_column("rssi", justify="right")
+                chain_table.add_column("signal", justify="center")
                 chain_table.add_column("qlt %", justify="right")
                 for row in chain_rows:
                     chain_table.add_row(*row)
@@ -257,6 +257,20 @@ def render_generic(record: ModuleRecord, label: str) -> Group:
     if record.text_preview:
         blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
     return Group(*blocks)
+
+
+def render_signal_bar(rssi: float) -> Text:
+    thresholds = [-85.0, -75.0, -74.0, -73.0, -72.0, -71.0, -60.0, -45.0, -20.0, 16.0]
+    active = sum(1 for th in thresholds if rssi >= th)
+    bar = Text("[")
+    for idx, _ in enumerate(thresholds):
+        style = "red" if idx < 2 else "yellow" if idx < 6 else "green"
+        if idx < active:
+            bar.append("∣", style=style)
+        else:
+            bar.append("·", style="dim")
+    bar.append("]")
+    return bar
 
 
 def render_module(record: ModuleRecord, now: float) -> Panel:
