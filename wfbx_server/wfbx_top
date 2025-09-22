@@ -258,7 +258,7 @@ def render_generic(record: ModuleRecord, label: str) -> Group:
         blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
     return Group(*blocks)
 
-
+#[∣❘❙❚]
 def render_signal_bar(rssi: float) -> Text:
     thresholds = [
         -80.0, -75.0, -74.0, -73.0, -72.0,
@@ -272,7 +272,7 @@ def render_signal_bar(rssi: float) -> Text:
     for idx, _ in enumerate(thresholds):
         style = "red" if idx < 2 else "yellow" if idx < 6 else "green"
         if idx < active:
-            bar.append("∣", style=style)
+            bar.append("❘", style=style)
         else:
             bar.append("·", style="dim")
     bar.append("]")
