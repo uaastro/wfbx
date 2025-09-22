@@ -271,6 +271,7 @@ struct if_detail {
 /* Per-TX aggregate across interfaces */
 struct tx_detail {
   uint64_t unique_pkts;       /* dedup across ifaces */
+  uint64_t bytes;             /* deduped payload bytes (per period) */
   struct if_detail ifs[MAX_IFS];
   struct epoch_stats es_overall; /* earliest-arrival based */
   /* Global loss across interfaces (on deduped stream) */
@@ -300,6 +301,7 @@ static void stats_reset_period(int n_if)
     TX[t].rssi_samples = 0;
     /* keep epoch state across periods */
     TXD[t].unique_pkts = 0;
+    TXD[t].bytes = 0;
     /* zero per-TX epoch aggregates */
     memset(&TXD[t].es_overall, 0, sizeof(TXD[t].es_overall));
     TXD[t].have_seq_glob = 0;
@@ -938,6 +940,9 @@ int main(int argc, char** argv)
             TX[tx_id].rssi_sum += pkt_best; TX[tx_id].rssi_samples++;
           }
           TXD[tx_id].unique_pkts++;
+          size_t unique_len = v.payload_len;
+          if (trailer_found > 0 && unique_len >= trailer_found) unique_len -= trailer_found;
+          TXD[tx_id].bytes += unique_len;
           /* Global (deduped) loss tracking for TX */
           if (!TXD[tx_id].have_seq_glob) {
             TXD[tx_id].have_seq_glob = 1;
@@ -1054,7 +1059,12 @@ stats_tick:
           uint64_t exp_tx_total = (uint64_t)packets_unique + (uint64_t)lost_glob;
           double qlt_tx = (exp_tx_total > 0) ? ((double)packets_unique * 1000.0 / (double)exp_tx_total) : 1000.0;
           tx_entry->summary.quality_permille = clamp_permille((int)lrint(qlt_tx));
-          tx_entry->summary.rate_kbps = 0;
+          double rate_kbps = 0.0;
+          if (cli.stat_period_ms > 0) {
+            rate_kbps = ((double)TXD[tX].bytes * 8.0) / (double)cli.stat_period_ms;
+          }
+          if (rate_kbps > (double)INT32_MAX) rate_kbps = (double)INT32_MAX;
+          tx_entry->summary.rate_kbps = (int32_t)lrint(rate_kbps);
           int best_chain_avg = -127;
           for (int i2 = 0; i2 < n_open; ++i2) {
             for (int c = 0; c < RX_ANT_MAX; ++c) {
