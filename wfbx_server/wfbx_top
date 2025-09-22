@@ -4,13 +4,13 @@ import atexit
 import selectors
 import signal
 import socket
-import struct
 import sys
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import click
+from rich import box
 from rich.align import Align
 from rich.columns import Columns
 from rich.console import Console, Group
@@ -45,13 +45,13 @@ def create_mcast_socket(group_ip: str, port: int) -> socket.socket:
     except OSError:
         sock.bind((group_ip, port))
     group_bin = socket.inet_aton(group_ip)
-    memberships = [socket.INADDR_ANY]
+    iface_bins: List[bytes] = [socket.inet_aton("0.0.0.0")]
     try:
-        memberships.append(struct.unpack("=l", socket.inet_aton("127.0.0.1"))[0])
+        iface_bins.append(socket.inet_aton("127.0.0.1"))
     except OSError:
         pass
-    for iface in memberships:
-        mreq = struct.pack("=4sl", group_bin, iface)
+    for iface_bin in iface_bins:
+        mreq = group_bin + iface_bin
         try:
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         except OSError:
@@ -181,24 +181,47 @@ def render_summary_table(record: ModuleRecord) -> Table:
 
 
 def render_mx(record: ModuleRecord) -> Group:
-    blocks: List = [render_summary_table(record)]
+    blocks: List = []
+    summary = record.summary
+    if summary is not None:
+        summary_line = Text(
+            f"pkts={summary.packets_total} ctrl_epoch={summary.ctrl_epoch_sent} "
+            f"tx={summary.tx_count} ifaces={summary.iface_count}",
+            style="cyan",
+        )
+    else:
+        summary_line = Text("summary unavailable", style="dim")
+    blocks.append(summary_line)
+
     if record.tx_entries:
-        tx_table = Table(show_header=True, header_style="magenta", expand=True, title="TX summary")
-        tx_table.add_column("TX")
-        tx_table.add_column("Packets", justify="right")
-        tx_table.add_column("Lost", justify="right")
-        tx_table.add_column("Quality %", justify="right")
-        tx_table.add_column("Rate kbps", justify="right")
-        for entry in record.tx_entries[:5]:
-            quality = f"{entry.quality_permille / 10.0:.1f}"
+        dt_ms = summary.dt_ms if summary and summary.dt_ms > 0 else 1000
+        tx_table = Table(
+            show_header=True,
+            header_style="magenta",
+            expand=True,
+            box=box.ROUNDED,
+            show_lines=False,
+        )
+        tx_table.add_column("TX", justify="right")
+        tx_table.add_column("pkts/s", justify="right")
+        tx_table.add_column("lost", justify="right")
+        tx_table.add_column("rate kbps", justify="right")
+        tx_table.add_column("rssi", justify="right")
+        tx_table.add_column("qlt %", justify="right")
+        for entry in record.tx_entries:
+            pkts_per_sec = entry.packets * 1000.0 / dt_ms if dt_ms > 0 else float(entry.packets)
+            rssi = entry.rssi_q8 / 256.0
+            quality = entry.quality_permille / 10.0
             tx_table.add_row(
-                str(entry.tx_id),
-                str(entry.packets),
-                str(entry.lost),
-                quality,
-                str(entry.rate_kbps),
+                f"{entry.tx_id}",
+                f"{pkts_per_sec:.1f}",
+                f"{entry.lost}",
+                f"{entry.rate_kbps}",
+                f"{rssi:.1f}",
+                f"{quality:.1f}",
             )
         blocks.append(tx_table)
+
     if record.text_preview:
         blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
     return Group(*blocks)
@@ -213,7 +236,12 @@ def render_generic(record: ModuleRecord, label: str) -> Group:
 
 def render_module(record: ModuleRecord, now: float) -> Panel:
     age = now - record.last_update
-    title = f"{record.header.module_id or 'unknown'} [{record.kind}]"
+    if record.kind == "mx":
+        host = record.header.host_id or "-"
+        module = record.header.module_id or "unknown"
+        title = f"{host}.{module}"
+    else:
+        title = f"{record.header.module_id or 'unknown'} [{record.kind}]"
     subtitle = f"age {age:0.1f}s"
     if record.kind == "mx":
         body = render_mx(record)
@@ -232,16 +260,6 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
     ordered = [modules[key] for key in sorted(modules.keys())]
     panels = [render_module(rec, now) for rec in ordered]
     return Panel(Columns(panels, expand=True), border_style="blue", title="wfbx_top")
-
-
-def render_debug_panel(total_packets: int, filtered_packets: int, active_modules: int) -> Panel:
-    table = Table.grid(expand=True)
-    table.add_column(justify="left", style="yellow")
-    table.add_column(justify="right", style="bold")
-    table.add_row("Packets processed", str(total_packets))
-    table.add_row("Filtered out", str(filtered_packets))
-    table.add_row("Active modules", str(active_modules))
-    return Panel(table, title="debug", border_style="magenta")
 
 
 @click.command()
@@ -313,9 +331,7 @@ def main(mcast_ip: str,
                         continue
                     modules[record.key] = record
             prune_stale(modules, now, idle_sec)
-            dashboard = render_dashboard(modules, now)
-            debug_panel = render_debug_panel(total_packets, filtered_packets, len(modules))
-            live.update(Columns([dashboard, debug_panel], expand=True))
+            live.update(render_dashboard(modules, now))
 
 
 if __name__ == "__main__":
