@@ -145,6 +145,27 @@ def parse_sections(payload: bytes, expected_count: int) -> List[Tuple[int, bytes
     return sections
 
 
+def render_signal_bar(
+    value: float,
+    thresholds: Sequence[float],
+    *,
+    glyph_active: str = "❚",
+    glyph_inactive: str = "·",
+    prefix: str = "[",
+    suffix: str = "]",
+) -> str:
+    active = sum(1 for threshold in thresholds if value >= threshold)
+    parts = [prefix]
+    for idx, _ in enumerate(thresholds):
+        colour = "red" if idx < 2 else "yellow" if idx < 6 else "green"
+        if idx < active:
+            parts.append(f"[{colour}]{glyph_active}[/{colour}]")
+        else:
+            parts.append(glyph_inactive)
+    parts.append(suffix)
+    return "".join(parts)
+
+
 SUMMARY_STRUCT = struct.Struct(">IIIIHHHH")
 
 
@@ -201,4 +222,5 @@ __all__ = [
     "parse_sections",
     "compute_crc32",
     "make_sections",
+    "render_signal_bar",
 ]
