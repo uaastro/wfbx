@@ -210,10 +210,10 @@ def render_mx(record: ModuleRecord) -> Group:
             # Antenna-level detail for this TX
             chain_rows: List[Tuple[str, ...]] = []
             for if_entry in record.if_entries:
-                if if_entry.detail.tx_id != entry.tx_id:
+                if if_entry.tx_id != entry.tx_id:
                     continue
-                iface_id = if_entry.detail.iface_id
-                for chain in if_entry.chains[: if_entry.detail.chain_count]:
+                iface_id = if_entry.iface_id
+                for chain in if_entry.chains:
                     chain_quality = chain.quality_permille / 10.0
                     chain_rssi = chain.rssi_avg_q8 / 256.0
                     chain_rows.append(
