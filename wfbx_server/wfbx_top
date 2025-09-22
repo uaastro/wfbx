@@ -184,18 +184,23 @@ def render_mx(record: ModuleRecord) -> Group:
     blocks: List = []
     summary = record.summary
     if summary is not None:
-        summary_line = Text(
-            f"pkts={summary.packets_total} ctrl_epoch={summary.ctrl_epoch_sent} "
-            f"tx={summary.tx_count} ifaces={summary.iface_count}",
-            style="cyan",
-        )
+        summary_line = Text()
+        summary_line.append("pkts ")
+        summary_line.append(f"{summary.packets_total}", style="bright_cyan")
+        summary_line.append("  ctrl_epoch ")
+        summary_line.append(f"{summary.ctrl_epoch_sent}", style="bright_cyan")
+        summary_line.append("  tx ")
+        summary_line.append(f"{summary.tx_count}", style="bright_cyan")
+        summary_line.append("  ifaces ")
+        summary_line.append(f"{summary.iface_count}", style="bright_cyan")
     else:
         summary_line = Text("summary unavailable", style="dim")
     blocks.append(summary_line)
 
     if record.tx_entries:
         dt_ms = summary.dt_ms if summary and summary.dt_ms > 0 else 1000
-        blocks.append(Text("·" * 40, style="magenta"))
+        width = console.size.width if console.size.width else 40
+        blocks.append(Text("·" * width, style="magenta"))
         for entry in record.tx_entries:
             tx_table = Table(
                 show_header=True,
@@ -278,7 +283,7 @@ def render_generic(record: ModuleRecord, label: str) -> Group:
         blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
     return Group(*blocks)
 
-#[∣❘❙❚¦]
+
 _SIGNAL_THRESHOLDS = (
     -80.0, -75.0, -74.0, -73.0, -72.0,
     -71.0, -70.0, -71.0, -70.0, -69.0,
@@ -287,7 +292,7 @@ _SIGNAL_THRESHOLDS = (
     -45.0, -35.0, -25.0, -5.0, 16.0,
 )
 
-
+#[∣❘❙❚¦•]
 def render_signal_bar_text(rssi: float, glyph: str = "❘") -> Text:
     markup = stats_core.render_signal_bar(
         rssi,
