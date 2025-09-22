@@ -200,6 +200,7 @@ def render_mx(record: ModuleRecord) -> Group:
     if record.tx_entries:
         dt_ms = summary.dt_ms if summary and summary.dt_ms > 0 else 1000
         width = console.size.width if console.size.width else 40
+        width = max(10, width - 4)
         blocks.append(Text("·" * width, style="magenta"))
         for entry in record.tx_entries:
             tx_table = Table(
@@ -220,6 +221,12 @@ def render_mx(record: ModuleRecord) -> Group:
             pkts_per_sec = entry.packets * 1000.0 / dt_ms if dt_ms > 0 else float(entry.packets)
             rssi = entry.rssi_q8 / 256.0
             quality = entry.quality_permille / 10.0
+            if quality >= 97.0:
+                quality_style = "bright_green"
+            elif quality >= 90.0:
+                quality_style = "yellow"
+            else:
+                quality_style = "bright_red"
             tx_table.add_row(
                 f"{entry.tx_id}",
                 f"{pkts_per_sec:.1f}",
@@ -227,7 +234,7 @@ def render_mx(record: ModuleRecord) -> Group:
                 f"{entry.rate_kbps}",
                 f"{rssi:.1f}",
                 render_signal_bar_text(rssi),
-                f"{quality:.1f}",
+                Text(f"{quality:.1f}", style=quality_style),
             )
 
             blocks.append(tx_table)
@@ -269,8 +276,18 @@ def render_mx(record: ModuleRecord) -> Group:
                 chain_table.add_column("signal", justify="center")
                 chain_table.add_column("qlt %", justify="right")
                 for row in chain_rows:
-                    chain_table.add_row(*row)
+                    styled_row = [
+                        row[0],
+                        row[1],
+                        Text(row[2], style="bright_black"),
+                        Text(row[3], style="bright_black"),
+                        Text(row[4], style="bright_black"),
+                        row[5],
+                        Text(row[6], style="bright_black"),
+                    ]
+                    chain_table.add_row(*styled_row)
                 blocks.append(chain_table)
+            blocks.append(Text(""))
 
     if record.text_preview:
         blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
