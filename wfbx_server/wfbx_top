@@ -207,6 +207,46 @@ def render_mx(record: ModuleRecord) -> Group:
             )
             blocks.append(Text(line, style="magenta"))
 
+            # Antenna-level detail for this TX
+            chain_rows: List[Tuple[str, ...]] = []
+            for if_entry in record.if_entries:
+                if if_entry.detail.tx_id != entry.tx_id:
+                    continue
+                iface_id = if_entry.detail.iface_id
+                for chain in if_entry.chains[: if_entry.detail.chain_count]:
+                    chain_quality = chain.quality_permille / 10.0
+                    chain_rssi = chain.rssi_avg_q8 / 256.0
+                    chain_rows.append(
+                        (
+                            f"{iface_id}",
+                            f"{chain.chain_id}",
+                            f"{chain.ant_id}",
+                            f"{chain.packets}",
+                            f"{chain.lost}",
+                            f"{chain_rssi:.1f}",
+                            f"{chain_quality:.1f}"
+                        )
+                    )
+
+            if chain_rows:
+                chain_table = Table(
+                    show_header=True,
+                    header_style="cyan",
+                    expand=True,
+                    box=None,
+                    padding=(0, 1),
+                )
+                chain_table.add_column("if", justify="right")
+                chain_table.add_column("chain", justify="right")
+                chain_table.add_column("ant", justify="right")
+                chain_table.add_column("pkts", justify="right")
+                chain_table.add_column("lost", justify="right")
+                chain_table.add_column("rssi", justify="right")
+                chain_table.add_column("qlt %", justify="right")
+                for row in chain_rows:
+                    chain_table.add_row(*row)
+                blocks.append(chain_table)
+
     if record.text_preview:
         blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
     return Group(*blocks)
