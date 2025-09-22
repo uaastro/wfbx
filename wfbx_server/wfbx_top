@@ -277,8 +277,8 @@ def render_mx(record: ModuleRecord) -> Group:
                 chain_table.add_column("qlt %", justify="right")
                 for row in chain_rows:
                     styled_row = [
-                        row[0],
-                        row[1],
+                        Text(row[0], style="bright_black"),
+                        Text(row[1], style="bright_black"),
                         Text(row[2], style="bright_black"),
                         Text(row[3], style="bright_black"),
                         Text(row[4], style="bright_black"),
