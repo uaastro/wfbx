@@ -196,18 +196,40 @@ def render_mx(record: ModuleRecord) -> Group:
     if record.tx_entries:
         dt_ms = summary.dt_ms if summary and summary.dt_ms > 0 else 1000
         blocks.append(Text("·" * 40, style="magenta"))
+
+        tx_table = Table(
+            show_header=True,
+            header_style="magenta",
+            expand=True,
+            box=None,
+            padding=(0, 1),
+        )
+        tx_table.add_column("tx", justify="right")
+        tx_table.add_column("pkts/s", justify="right")
+        tx_table.add_column("lost", justify="right")
+        tx_table.add_column("rate kbps", justify="right")
+        tx_table.add_column("rssi", justify="right")
+        tx_table.add_column("signal", justify="center")
+        tx_table.add_column("qlt %", justify="right")
+
         for entry in record.tx_entries:
             pkts_per_sec = entry.packets * 1000.0 / dt_ms if dt_ms > 0 else float(entry.packets)
             rssi = entry.rssi_q8 / 256.0
             quality = entry.quality_permille / 10.0
-            line = (
-                f"tx_id {entry.tx_id}: pkts/s {pkts_per_sec:.1f} | "
-                f"lost {entry.lost} | rate {entry.rate_kbps} kbps | "
-                f"rssi {rssi:.1f} dBm | qlt {quality:.1f}%"
+            tx_table.add_row(
+                f"{entry.tx_id}",
+                f"{pkts_per_sec:.1f}",
+                f"{entry.lost}",
+                f"{entry.rate_kbps}",
+                f"{rssi:.1f}",
+                render_signal_bar(rssi),
+                f"{quality:.1f}",
             )
-            blocks.append(Text(line, style="magenta"))
 
-            # Antenna-level detail for this TX
+        blocks.append(tx_table)
+
+        # Antenna-level detail for this TX
+        for entry in record.tx_entries:
             chain_rows: List[List[object]] = []
             for if_entry in record.if_entries:
                 if if_entry.tx_id != entry.tx_id:
