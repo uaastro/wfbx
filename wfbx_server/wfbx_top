@@ -272,7 +272,7 @@ def render_signal_bar(rssi: float) -> Text:
     for idx, _ in enumerate(thresholds):
         style = "red" if idx < 2 else "yellow" if idx < 6 else "green"
         if idx < active:
-            bar.append("❙", style=style)
+            bar.append("¦", style=style)
         else:
             bar.append("·", style="dim")
     bar.append("]")
