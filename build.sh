@@ -14,7 +14,7 @@ echo "[BUILD] wfbx_tx"
 $CC $CFLAGS -o ./bin/wfbx_tx ./src/wfbx_tx.c ./src/wfbx_stats_core.c ./src/wfbx_stats_tx.c $LDFLAGS_COMMON -lpcap -lpthread -lm
 
 echo "[BUILD] wfbx_rx"
-$CC $CFLAGS -o ./bin/wfbx_rx ./src/wfbx_rx.c $LDFLAGS_COMMON -lpcap
+$CC $CFLAGS -o ./bin/wfbx_rx ./src/wfbx_rx.c ./src/wfbx_stats_core.c ./src/wfbx_stats_rx.c $LDFLAGS_COMMON -lpcap -lm
 
 echo "[BUILD] wfbx_mx"
 $CC $CFLAGS -o ./bin/wfbx_mx ./src/wfbx_mx.c ./src/wfbx_ifutil.c ./src/wfbx_stats_core.c ./src/wfbx_stats_mx.c $LDFLAGS_COMMON -lpcap -lm

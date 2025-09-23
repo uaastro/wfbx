@@ -6,6 +6,7 @@
  * added here as needed. */
 
 #include "wfbx_stats_core.h"
+#include "wfbx_stats_rx.h"
 #include "wfbx_stats_mx.h"
 #include "wfbx_stats_tx.h"
 

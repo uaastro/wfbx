@@ -22,6 +22,7 @@ from rich.text import Text
 from wfbxlib.stats import core as stats_core
 from wfbxlib.stats import mx as stats_mx
 from wfbxlib.stats import tx as stats_tx
+from wfbxlib.stats import rx as stats_rx
 
 console = Console()
 
@@ -39,6 +40,10 @@ class ModuleRecord:
     tx_queue: Optional[stats_tx.QueueStats]
     tx_slot: Optional[stats_tx.SlotStats]
     tx_epoch: Optional[stats_tx.EpochStats]
+    rx_summary: Optional[stats_rx.Summary]
+    rx_tx_entries: List[stats_rx.TxSummary]
+    rx_if_entries: List[stats_rx.IfDetail]
+    rx_filter: Optional[stats_rx.FilterInfo]
     last_update: float
 
 
@@ -75,6 +80,10 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
     tx_queue: Optional[stats_tx.QueueStats] = None
     tx_slot: Optional[stats_tx.SlotStats] = None
     tx_epoch: Optional[stats_tx.EpochStats] = None
+    rx_summary: Optional[stats_rx.Summary] = None
+    rx_tx_entries: List[stats_rx.TxSummary] = []
+    rx_if_entries: List[stats_rx.IfDetail] = []
+    rx_filter: Optional[stats_rx.FilterInfo] = None
 
     for section_type, payload in sections:
         if section_type == stats_core.SectionType.SUMMARY:
@@ -104,6 +113,31 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
                     global_debug = stats_mx.GlobalDebug.unpack(payload)
                 except ValueError:
                     global_debug = None
+        elif header.module_type == stats_core.ModuleType.RX:
+            try:
+                rx_type = stats_rx.SectionType(section_type)
+            except ValueError:
+                continue
+            if rx_type == stats_rx.SectionType.SUMMARY:
+                try:
+                    rx_summary = stats_rx.Summary.unpack(payload)
+                except ValueError:
+                    rx_summary = None
+            elif rx_type == stats_rx.SectionType.TX_SUMMARY:
+                try:
+                    rx_tx_entries = stats_rx.unpack_tx_summary_section(payload)
+                except ValueError:
+                    rx_tx_entries = []
+            elif rx_type == stats_rx.SectionType.IF_DETAIL:
+                try:
+                    rx_if_entries = stats_rx.unpack_if_detail_section(payload)
+                except ValueError:
+                    rx_if_entries = []
+            elif rx_type == stats_rx.SectionType.FILTERS:
+                try:
+                    rx_filter = stats_rx.unpack_filter_section(payload)
+                except ValueError:
+                    rx_filter = None
         elif header.module_type == stats_core.ModuleType.TX:
             try:
                 tx_type = stats_tx.SectionType(section_type)
@@ -140,6 +174,10 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
         tx_queue,
         tx_slot,
         tx_epoch,
+        rx_summary,
+        rx_tx_entries,
+        rx_if_entries,
+        rx_filter,
     )
 
 
@@ -172,6 +210,10 @@ def build_record(datagram: bytes, now: float) -> ModuleRecord:
         tx_queue,
         tx_slot,
         tx_epoch,
+        rx_summary,
+        rx_tx_entries,
+        rx_if_entries,
+        rx_filter,
     ) = parse_sections(header, sections)
     host_id = header.host_id or "unknown"
     module_id = header.module_id or "unknown"
@@ -190,6 +232,10 @@ def build_record(datagram: bytes, now: float) -> ModuleRecord:
         tx_queue=tx_queue,
         tx_slot=tx_slot,
         tx_epoch=tx_epoch,
+        rx_summary=rx_summary,
+        rx_tx_entries=rx_tx_entries,
+        rx_if_entries=rx_if_entries,
+        rx_filter=rx_filter,
         last_update=now,
     )
 
@@ -233,6 +279,27 @@ def render_summary_table(record: ModuleRecord) -> Table:
         table.add_row("Bytes", str(summary.bytes_total))
         table.add_row("Interfaces", str(summary.iface_count))
         table.add_row("TX count", str(summary.tx_count))
+    elif record.rx_summary is not None:
+        summary = record.rx_summary
+        table.add_row("Window ms", str(summary.dt_ms))
+        table.add_row("Packets", str(summary.packets_total))
+        table.add_row("Bytes", str(summary.bytes_total))
+        table.add_row("Interfaces", str(summary.iface_count))
+        table.add_row("TX count", str(summary.tx_count))
+        table.add_row("Filter flags", f"0x{summary.filter_flags:04X}")
+        if record.rx_filter is not None:
+            filt = record.rx_filter
+            txf_mode = {0: "any", 1: "include", 2: "exclude"}.get(filt.txf_mode, str(filt.txf_mode))
+            spec = filt.txf_spec or "-"
+            table.add_row("TX filter", f"{txf_mode}: {spec}")
+            if filt.has_link_id:
+                table.add_row("Link filter", str(filt.link_id))
+            else:
+                table.add_row("Link filter", "any")
+            if filt.has_radio_port:
+                table.add_row("Radio filter", str(filt.radio_port))
+            else:
+                table.add_row("Radio filter", "any")
     else:
         table.add_row("Summary", "n/a")
     return table
@@ -444,6 +511,137 @@ def render_tx(record: ModuleRecord) -> Group:
     return Group(*blocks)
 
 
+def render_rx(record: ModuleRecord) -> Group:
+    blocks: List = []
+    summary = record.rx_summary
+    if summary is not None:
+        summary_line = Text()
+        summary_line.append("pkts ")
+        summary_line.append(f"{summary.packets_total}", style="bright_cyan")
+        summary_line.append("  bytes ")
+        summary_line.append(f"{summary.bytes_total}", style="bright_cyan")
+        summary_line.append("  ifaces ")
+        summary_line.append(f"{summary.iface_count}", style="bright_cyan")
+        summary_line.append("  tx ")
+        summary_line.append(f"{summary.tx_count}", style="bright_cyan")
+        summary_line.append("  filters ")
+        summary_line.append(f"0x{summary.filter_flags:04X}", style="bright_magenta")
+    else:
+        summary_line = Text("summary unavailable", style="dim")
+    blocks.append(summary_line)
+
+    if record.rx_filter is not None:
+        filt = record.rx_filter
+        txf_mode = {0: "any", 1: "include", 2: "exclude"}.get(filt.txf_mode, str(filt.txf_mode))
+        filter_line = Text("filters: ", style="cyan")
+        filter_line.append(f"tx={txf_mode} {filt.txf_spec or '-'}", style="bright_white")
+        filter_line.append("  link=", style="cyan")
+        filter_line.append(str(filt.link_id) if filt.has_link_id else "any", style="bright_white")
+        filter_line.append("  radio=", style="cyan")
+        filter_line.append(str(filt.radio_port) if filt.has_radio_port else "any", style="bright_white")
+        blocks.append(filter_line)
+
+    dt_ms = summary.dt_ms if summary and summary.dt_ms > 0 else 1000
+
+    if record.rx_tx_entries:
+        tx_table = Table(
+            show_header=True,
+            header_style="magenta",
+            expand=True,
+            box=None,
+            padding=(0, 1),
+        )
+        tx_table.add_column("tx", justify="right")
+        tx_table.add_column("pkts/s", justify="right")
+        tx_table.add_column("lost", justify="right")
+        tx_table.add_column("rate kbps", justify="right")
+        tx_table.add_column("rssi", justify="right")
+        tx_table.add_column("signal", justify="center")
+        tx_table.add_column("qlt %", justify="right")
+
+        for entry in record.rx_tx_entries:
+            pkts_per_sec = entry.packets * 1000.0 / dt_ms if dt_ms > 0 else float(entry.packets)
+            rssi = entry.rssi_q8 / 256.0
+            quality = entry.quality_permille / 10.0
+            if quality >= 97.0:
+                quality_style = "bright_green"
+            elif quality >= 90.0:
+                quality_style = "yellow"
+            else:
+                quality_style = "bright_red"
+            tx_table.add_row(
+                f"{entry.tx_id}",
+                f"{pkts_per_sec:.1f}",
+                f"{entry.lost}",
+                f"{entry.rate_kbps}",
+                f"{rssi:.1f}",
+                render_signal_bar_text(rssi),
+                Text(f"{quality:.1f}", style=quality_style),
+            )
+
+        blocks.append(tx_table)
+
+        for entry in record.rx_tx_entries:
+            chain_rows: List[List[object]] = []
+            for if_entry in sorted(record.rx_if_entries, key=lambda d: (d.tx_id, d.iface_id)):
+                if if_entry.tx_id != entry.tx_id:
+                    continue
+                freq_text = f"{if_entry.freq_mhz}" if if_entry.freq_mhz else "-"
+                iface_quality = if_entry.quality_permille / 10.0
+                iface_rssi = if_entry.best_chain_rssi_q8 / 256.0
+                chain_rows.append([
+                    Text(str(if_entry.iface_id), style="bright_white"),
+                    Text(freq_text, style="bright_white"),
+                    Text("-", style="bright_black"),
+                    Text(str(if_entry.packets), style="bright_white"),
+                    Text(str(if_entry.lost), style="bright_white"),
+                    Text(f"{iface_rssi:.1f}", style="bright_white"),
+                    render_signal_bar_text(iface_rssi, glyph="❚"),
+                    Text(f"{iface_quality:.1f}", style="bright_white"),
+                ])
+                for chain in if_entry.chains:
+                    chain_quality = chain.quality_permille / 10.0
+                    chain_rssi = chain.rssi_avg_q8 / 256.0
+                    chain_rows.append([
+                        Text(str(if_entry.iface_id), style="bright_black"),
+                        Text(freq_text, style="bright_black"),
+                        Text(str(chain.ant_id), style="bright_black"),
+                        Text(str(chain.packets), style="bright_black"),
+                        Text(str(chain.lost), style="bright_black"),
+                        Text(f"{chain_rssi:.1f}", style="bright_black"),
+                        render_signal_bar_text(chain_rssi, glyph="❘"),
+                        Text(f"{chain_quality:.1f}", style="bright_black"),
+                    ])
+
+            if chain_rows:
+                chain_table = Table(
+                    show_header=True,
+                    header_style="cyan",
+                    expand=True,
+                    box=None,
+                    padding=(0, 1),
+                )
+                chain_table.add_column("if", justify="right")
+                chain_table.add_column("freq", justify="right")
+                chain_table.add_column("ant", justify="right")
+                chain_table.add_column("pkts", justify="right")
+                chain_table.add_column("lost", justify="right")
+                chain_table.add_column("rssi", justify="right")
+                chain_table.add_column("signal", justify="center")
+                chain_table.add_column("qlt %", justify="right")
+                for row in chain_rows:
+                    chain_table.add_row(*row)
+                blocks.append(chain_table)
+        blocks.append(Text(""))
+    else:
+        blocks.append(Text("no RX tx entries", style="dim"))
+
+    if record.text_preview:
+        blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
+
+    return Group(*blocks)
+
+
 def render_generic(record: ModuleRecord, label: str) -> Group:
     blocks: List = [render_summary_table(record)]
     if record.text_preview:
@@ -479,13 +677,17 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
+    elif record.kind in {"rx", "xrx", "rxx"}:
+        host = record.header.host_id or "-"
+        module = record.header.module_id or "unknown"
+        title = f"{host}.{module}"
     else:
         title = f"{record.header.module_id or 'unknown'} [{record.kind}]"
     subtitle = f"age {age:0.1f}s"
     if record.kind == "mx":
         body = render_mx(record)
     elif record.kind in {"rx", "xrx", "rxx"}:
-        body = render_generic(record, "rx")
+        body = render_rx(record)
     elif record.kind in {"tx", "xtx"}:
         body = render_tx(record)
     else:

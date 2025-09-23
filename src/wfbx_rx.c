@@ -37,6 +37,7 @@
 #include <time.h>
 #include <limits.h>
 #include <ctype.h>
+#include <stdbool.h>
 
 #ifdef __linux__
   #include <endian.h>
@@ -69,6 +70,8 @@
 #endif
 
 #include "wfb_defs.h"
+#include "wfbx_stats_pkt.h"
+#include "wfbx_ifutil.h"
 
 /* ---- Defaults ---- */
 #ifndef STATS_PERIOD_MS_DEFAULT
@@ -104,6 +107,7 @@ struct per_if_seq_state {
   int have_seq;          /* whether we saw any frame from this tx on this iface */
   uint16_t expect_seq;   /* next expected 12-bit seq on this iface */
   uint32_t lost;         /* number of missing frames on this iface for current period */
+  uint32_t packets;      /* accepted packets for this iface within the period */
 };
 
 #define MAX_IFS 8
@@ -111,12 +115,63 @@ struct per_if_seq_state {
 static const char* g_dest_ip_default   = "127.0.0.1";
 static const int   g_dest_port_default = 5600;
 
+static inline uint16_t clamp_u16(uint32_t v) { return (uint16_t)(v > 0xFFFFu ? 0xFFFFu : v); }
+
+static inline uint16_t clamp_permille(int value)
+{
+  if (value < 0) return 0;
+  if (value > 1000) return 1000;
+  return (uint16_t)value;
+}
+
+static inline int16_t to_q8(double value)
+{
+  long temp = lrint(value * 256.0);
+  if (temp < INT16_MIN) temp = INT16_MIN;
+  if (temp > INT16_MAX) temp = INT16_MAX;
+  return (int16_t)temp;
+}
+
 /* Monotonic milliseconds */
 static uint64_t now_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
+
+static inline uint64_t mono_us_raw(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+  return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+}
+
+static int append_section(uint8_t* dst, size_t* offset, size_t cap, uint16_t type, const uint8_t* data, uint16_t length)
+{
+  if (!dst || !offset) return -1;
+  if (*offset + 4u + length > cap) return -1;
+  dst[*offset + 0] = (uint8_t)(type >> 8);
+  dst[*offset + 1] = (uint8_t)(type & 0xFF);
+  dst[*offset + 2] = (uint8_t)(length >> 8);
+  dst[*offset + 3] = (uint8_t)(length & 0xFF);
+  if (length > 0 && data) memcpy(dst + *offset + 4, data, length);
+  *offset += 4u + length;
+  return 0;
+}
+
+#define WFBX_RX_STATS_MAX_PACKET 1400
+
+static uint8_t g_rx_stats_packet[WFBX_RX_STATS_MAX_PACKET];
+static size_t  g_rx_stats_packet_len = 0;
+static uint32_t g_rx_stats_tick_id = 0;
+static char g_rx_stats_module_id[24] = "rx";
+
+static void stats_send_packet(int sock, const struct sockaddr_in* addr);
+
+typedef struct {
+  wfbx_rx_if_detail_t detail;
+  wfbx_rx_chain_detail_t chains[RX_ANT_MAX];
+} rx_if_entry_t;
 
 /* Radiotap RX parse */
 struct rt_stats {
@@ -329,6 +384,7 @@ struct cli_cfg {
   const char* stat_ip;
   int stat_port;
   const char* stat_id;
+  const char* tx_filter_spec;
 };
 
 static void print_help(const char* prog)
@@ -365,6 +421,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
   cfg->ip = g_dest_ip_default;
   cfg->port = g_dest_port_default;
   txf_parse(&cfg->txf, "0");   /* default: only tx_id=0 */
+  cfg->tx_filter_spec = "0";
   cfg->link_id = 0;
   cfg->radio_port = 0;
   cfg->n_if = 0;
@@ -399,7 +456,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
       else if (strcmp(name,"stat_ip")==0)      cfg->stat_ip = val;
       else if (strcmp(name,"stat_port")==0)    cfg->stat_port = atoi(val);
       else if (strcmp(name,"stat_id")==0)      cfg->stat_id = val;
-      else if (strcmp(name,"tx_id")==0)        txf_parse(&cfg->txf, val);
+      else if (strcmp(name,"tx_id")==0) { cfg->tx_filter_spec = val; txf_parse(&cfg->txf, val); }
       else if (strcmp(name,"link_id")==0)      cfg->link_id = atoi(val);
       else if (strcmp(name,"radio_port")==0)   cfg->radio_port = atoi(val);
       else if (strcmp(name,"stat_period")==0)  cfg->stat_period_ms = atoi(val);
@@ -522,6 +579,31 @@ int main(int argc, char** argv)
     return 1;
   }
 
+  int stat_sock = socket(AF_INET, SOCK_DGRAM, 0);
+  struct sockaddr_in stat_addr;
+  memset(&stat_addr, 0, sizeof(stat_addr));
+  stat_addr.sin_family = AF_INET;
+  stat_addr.sin_port = htons(cli.stat_port);
+  if (stat_sock >= 0) {
+    if (!inet_aton(cli.stat_ip, &stat_addr.sin_addr)) {
+      fprintf(stderr, "inet_aton failed for stats server %s\n", cli.stat_ip);
+      close(stat_sock);
+      stat_sock = -1;
+    } else {
+      fprintf(stderr, "[STATS] RX stats socket created -> %s:%d (fd=%d)\n",
+              cli.stat_ip, cli.stat_port, stat_sock);
+    }
+  } else {
+    perror("stats socket");
+  }
+
+  if (cli.stat_id && *cli.stat_id) {
+    snprintf(g_rx_stats_module_id, sizeof(g_rx_stats_module_id), "%.*s",
+             (int)(sizeof(g_rx_stats_module_id) - 1), cli.stat_id);
+  } else {
+    snprintf(g_rx_stats_module_id, sizeof(g_rx_stats_module_id), "rx");
+  }
+
   /* Open PCAP for each interface */
   pcap_t* ph[MAX_IFS] = {0};
   int fds[MAX_IFS]; for (int i=0;i<MAX_IFS;i++) fds[i] = -1;
@@ -595,6 +677,10 @@ int main(int argc, char** argv)
   struct per_chain_seq_state PC[MAX_TX_IDS][MAX_IFS][RX_ANT_MAX];
  
 
+  /* Per-TX per-IFACE sequence trackers for interface-level loss metrics. */
+  struct per_if_seq_state IFSTAT[MAX_TX_IDS][MAX_IFS];
+
+
   /* Per-TX per-IFACE per-CHAIN RSSI stats for the current period. */
   struct ant_stats ATX[MAX_TX_IDS][MAX_IFS][RX_ANT_MAX];
 
@@ -612,6 +698,12 @@ int main(int argc, char** argv)
         PC[t][a][c].lost = 0;
         ant_stats_clear(&ATX[t][a][c]); /* zero per-chain RSSI accumulators */
       }
+    for (int a = 0; a < n_open; ++a) {
+      IFSTAT[t][a].have_seq = 0;
+      IFSTAT[t][a].expect_seq = 0;
+      IFSTAT[t][a].lost = 0;
+      IFSTAT[t][a].packets = 0;
+    }
   }
 
   while (g_run) {
@@ -695,6 +787,20 @@ int main(int argc, char** argv)
         /* Per-IFACE dedup window so that statistics are updated independently for each interface. */
         int dup_iface = seqwin_check_set(&SWIF[tx_id][i], v.seq12);
         if (!dup_iface) {
+          struct per_if_seq_state* IS = &IFSTAT[tx_id][i];
+          if (!IS->have_seq) {
+            IS->have_seq = 1;
+            IS->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+          } else {
+            if (v.seq12 != IS->expect_seq) {
+              uint16_t gap = (uint16_t)((v.seq12 - IS->expect_seq) & 0x0FFF);
+              IS->lost += gap;
+              IS->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+            } else {
+              IS->expect_seq = (uint16_t)((IS->expect_seq + 1) & 0x0FFF);
+            }
+          }
+          IS->packets++;
           /* Per-CHAIN (on this iface) loss accounting and RSSI aggregation. */
           for (int c = 0; c < rs.chains && c < RX_ANT_MAX; ++c) {
             if (rs.rssi[c] == SCHAR_MIN) continue; /* chain not present in this frame */
@@ -782,6 +888,18 @@ stats_tick:
         /* We still fall through; no per-TX lines will appear because ex==0 for all tx_id. */
       }
 
+      int iface_freq_mhz[MAX_IFS];
+      for (int i = 0; i < n_open; ++i) {
+        iface_freq_mhz[i] = wfbx_if_get_frequency_mhz(cli.ifname[i]);
+      }
+
+      wfbx_rx_tx_summary_t tx_entries[MAX_TX_IDS];
+      size_t tx_entry_count = 0;
+      rx_if_entry_t if_entries[MAX_TX_IDS * MAX_IFS];
+      size_t if_entry_count = 0;
+      uint64_t bytes_total_sum = 0;
+      uint32_t packets_total_sum = 0;
+
       /* Print per-TX blocks. Active means we saw pkts or losses this period. */
       for (int t = 0; t < MAX_TX_IDS; ++t) {
         uint32_t pk = pkts_tx[t];
@@ -804,50 +922,255 @@ stats_tick:
           continue; /* nothing else to print for this tx_id */
         }
 
+        packets_total_sum += pk;
+        bytes_total_sum += bytes_tx[t];
+
         /* Aggregate per-TX RSSI over all ifaces/chains for header line.
          * Show MAX of per-chain AVERAGES over the reporting period. */
-        int tx_rssi_min = 127, tx_rssi_max = -127;
-        int64_t tx_rssi_sum = 0; uint32_t tx_rssi_samples = 0;
-        double tx_best_chain_avg = -127; /* if no samples -> will be set to 0.0 below */
+        double tx_best_chain_avg = -127;
+        int tx_have_samples = 0;
         for (int a=0; a<n_open; ++a) {
           for (int c=0; c<RX_ANT_MAX; ++c) {
             const struct ant_stats* S = &ATX[t][a][c];
             if (S->rssi_samples == 0) continue;
-            if (S->rssi_min < tx_rssi_min) tx_rssi_min = S->rssi_min;
-            if (S->rssi_max > tx_rssi_max) tx_rssi_max = S->rssi_max;
-            tx_rssi_sum += S->rssi_sum;
-            tx_rssi_samples += S->rssi_samples;
-            /* Per-chain average for this period */
             double chain_avg = (double)S->rssi_sum / (double)S->rssi_samples;
             if (chain_avg > tx_best_chain_avg) tx_best_chain_avg = chain_avg;
+            tx_have_samples = 1;
           }
         }
 
-       if (tx_rssi_samples == 0) { tx_rssi_min = 0; tx_rssi_max = 0; tx_best_chain_avg = -127; }
+        if (!tx_have_samples) tx_best_chain_avg = -127;
         double tx_kbps = seconds > 0.0 ? (bytes_tx[t] * 8.0 / 1000.0) / seconds : 0.0;
-        int tx_quality = ex ? (int)((pk * 100.0) / ex + 0.5) : 100;
+        double tx_quality_permille = ex ? ((double)pk * 1000.0) / (double)ex : 1000.0;
+        int tx_quality_percent = ex ? (int)((pk * 100.0) / ex + 0.5) : 100;
 
         fprintf(stderr,
           "[TX %03d] dt=%llu ms | pkts=%u lost=%u quality=%d%% | rate=%.1f kbps | RSSI = %.1f dBm\n",
-          t, (unsigned long long)(t1 - t0), pk, ls, tx_quality, tx_kbps, tx_best_chain_avg);
+          t, (unsigned long long)(t1 - t0), pk, ls, tx_quality_percent, tx_kbps, tx_best_chain_avg);
 
-        /* Per-antenna lines for this tx_id (lost is per IFACE+CHAIN). */
+        uint8_t iface_counter = 0;
+
         for (int a=0; a<n_open; ++a) {
-          //uint32_t lost_if = PL[t][a].lost;
+          uint32_t iface_packets = IFSTAT[t][a].packets;
+          uint32_t iface_lost = IFSTAT[t][a].lost;
+          wfbx_rx_chain_detail_t chain_tmp[RX_ANT_MAX];
+          uint8_t chain_count = 0;
+          double best_chain_avg_if = -127;
+
           for (int c=0; c<RX_ANT_MAX; ++c) {
             const struct ant_stats* S = &ATX[t][a][c];
-            //if (S->rssi_samples == 0 && lost_if == 0) continue;
-            //uint32_t exp_i = S->rssi_samples + lost_if;
             uint32_t lost_ch = PC[t][a][c].lost;
             if (S->rssi_samples == 0 && lost_ch == 0) continue;
             uint32_t exp_i = S->rssi_samples + lost_ch;
-            int q_i = exp_i ? (int)((S->rssi_samples * 100.0) / exp_i + 0.5) : 100;
             double ravg = (S->rssi_samples>0) ? ((double)S->rssi_sum / (double)S->rssi_samples) : 0.0;
+            if (S->rssi_samples > 0 && ravg > best_chain_avg_if) best_chain_avg_if = ravg;
+            int q_i = exp_i ? (int)((S->rssi_samples * 100.0) / exp_i + 0.5) : 100;
+            double q_chain_permille = exp_i ? ((double)S->rssi_samples * 1000.0) / (double)exp_i : 1000.0;
+            if (chain_count < RX_ANT_MAX) {
+              chain_tmp[chain_count].chain_id = (uint8_t)c;
+              chain_tmp[chain_count].ant_id = (uint8_t)S->ant_id;
+              chain_tmp[chain_count].quality_permille = clamp_permille((int)lrint(q_chain_permille));
+              chain_tmp[chain_count].rssi_min_q8 = to_q8((double)S->rssi_min);
+              chain_tmp[chain_count].rssi_avg_q8 = to_q8(ravg);
+              chain_tmp[chain_count].rssi_max_q8 = to_q8((double)S->rssi_max);
+              chain_tmp[chain_count].packets = clamp_u16(S->rssi_samples);
+              chain_tmp[chain_count].lost = clamp_u16(lost_ch);
+              chain_count++;
+            }
             fprintf(stderr, "   [ANT%03d] pkts=%u lost=%u quality=%d%% | rssi min/avg/max = %d/%.1f/%d dBm\n",
-+              ant_label_id(a,c), S->rssi_samples, lost_ch, q_i,
+                    ant_label_id(a,c), S->rssi_samples, lost_ch, q_i,
                     S->rssi_min, ravg, S->rssi_max);
           }
+
+          if (iface_packets == 0 && iface_lost == 0 && chain_count == 0) continue;
+
+          if (best_chain_avg_if == -127) best_chain_avg_if = 0.0;
+          double iface_quality_permille = (iface_packets + iface_lost) ?
+              ((double)iface_packets * 1000.0) / (double)(iface_packets + iface_lost) : 1000.0;
+
+          if (if_entry_count < MAX_TX_IDS * MAX_IFS) {
+            rx_if_entry_t* if_entry = &if_entries[if_entry_count];
+            memset(if_entry, 0, sizeof(*if_entry));
+            if_entry->detail.tx_id = (uint8_t)t;
+            if_entry->detail.iface_id = (uint8_t)a;
+            if_entry->detail.chain_count = chain_count;
+            if_entry->detail.packets = iface_packets;
+            if_entry->detail.lost = iface_lost;
+            if_entry->detail.quality_permille = clamp_permille((int)lrint(iface_quality_permille));
+            if_entry->detail.best_chain_rssi_q8 = to_q8(best_chain_avg_if);
+            if_entry->detail.freq_mhz = (uint16_t)clamp_u16((iface_freq_mhz[a] > 0) ? (uint32_t)iface_freq_mhz[a] : 0u);
+            memcpy(if_entry->chains, chain_tmp, (size_t)chain_count * sizeof(wfbx_rx_chain_detail_t));
+            if_entry_count++;
+          }
+
+          iface_counter++;
         }
+
+        if (tx_entry_count < MAX_TX_IDS) {
+          wfbx_rx_tx_summary_t* tx_entry = &tx_entries[tx_entry_count++];
+          memset(tx_entry, 0, sizeof(*tx_entry));
+          tx_entry->tx_id = (uint8_t)t;
+          tx_entry->iface_count = iface_counter;
+          tx_entry->state_flags = 0;
+          tx_entry->packets = pk;
+          tx_entry->lost = ls;
+          tx_entry->quality_permille = clamp_permille((int)lrint(tx_quality_permille));
+          tx_entry->rssi_q8 = to_q8(tx_best_chain_avg);
+          long rate_rounded = lrint(tx_kbps);
+          if (rate_rounded > INT32_MAX) rate_rounded = INT32_MAX;
+          if (rate_rounded < INT32_MIN) rate_rounded = INT32_MIN;
+          tx_entry->rate_kbps = (int32_t)rate_rounded;
+        }
+      }
+
+      uint16_t filter_flags = 0;
+      if (cli.txf.mode != TXF_ANY) filter_flags |= 0x0001;
+      if (cli.link_id >= 0)       filter_flags |= 0x0002;
+      if (cli.radio_port >= 0)    filter_flags |= 0x0004;
+
+      uint32_t dt_ms = (uint32_t)((t1 - t0) > UINT32_MAX ? UINT32_MAX : (t1 - t0));
+      uint32_t packets_total32 = packets_total_sum > UINT32_MAX ? UINT32_MAX : packets_total_sum;
+      uint32_t bytes_total32 = bytes_total_sum > UINT32_MAX ? UINT32_MAX : (uint32_t)bytes_total_sum;
+
+      wfbx_rx_summary_t summary_host = {
+        .dt_ms = dt_ms,
+        .packets_total = packets_total32,
+        .bytes_total = bytes_total32,
+        .iface_count = (uint16_t)n_open,
+        .tx_count = (uint16_t)tx_entry_count,
+        .filter_flags = filter_flags,
+        .reserved = 0
+      };
+
+      uint8_t payload[WFBX_RX_STATS_MAX_PACKET - WFBX_STATS_HEADER_SIZE];
+      size_t payload_off = 0;
+      uint16_t section_count = 0;
+      bool build_failed = false;
+
+      uint8_t summary_buf[sizeof(wfbx_rx_summary_t)];
+      if (wfbx_rx_summary_pack(summary_buf, sizeof(summary_buf), &summary_host) < 0 ||
+          append_section(payload, &payload_off, sizeof(payload), WFBX_RX_SECTION_SUMMARY, summary_buf, (uint16_t)sizeof(summary_buf)) != 0) {
+        fprintf(stderr, "[STATS] RX summary append failed\n");
+        build_failed = true;
+      } else {
+        section_count++;
+      }
+
+      uint8_t* tx_payload = NULL;
+      size_t tx_payload_len = tx_entry_count * sizeof(wfbx_rx_tx_summary_t);
+      if (!build_failed && tx_entry_count > 0) {
+        if (tx_payload_len > UINT16_MAX) {
+          build_failed = true;
+        } else {
+          tx_payload = (uint8_t*)malloc(tx_payload_len);
+          if (!tx_payload) {
+            build_failed = true;
+          } else {
+            size_t tx_offset = 0;
+            for (size_t i = 0; i < tx_entry_count && !build_failed; ++i) {
+              if (wfbx_rx_tx_summary_pack(tx_payload + tx_offset, tx_payload_len - tx_offset, &tx_entries[i]) < 0) {
+                build_failed = true;
+                break;
+              }
+              tx_offset += sizeof(wfbx_rx_tx_summary_t);
+            }
+            if (!build_failed) {
+              if (append_section(payload, &payload_off, sizeof(payload), WFBX_RX_SECTION_TX_SUMMARY, tx_payload, (uint16_t)tx_payload_len) != 0) {
+                fprintf(stderr, "[STATS] RX TX summary append failed\n");
+                build_failed = true;
+              } else {
+                section_count++;
+              }
+            }
+          }
+        }
+      }
+
+      uint8_t* if_payload = NULL;
+      size_t if_payload_len = 0;
+      if (!build_failed && if_entry_count > 0) {
+        for (size_t i = 0; i < if_entry_count; ++i) {
+          if_payload_len += sizeof(wfbx_rx_if_detail_t) + if_entries[i].detail.chain_count * sizeof(wfbx_rx_chain_detail_t);
+        }
+        if (if_payload_len > UINT16_MAX) {
+          build_failed = true;
+        } else {
+          if_payload = (uint8_t*)malloc(if_payload_len);
+          if (!if_payload) {
+            build_failed = true;
+          } else {
+            size_t if_offset = 0;
+            for (size_t i = 0; i < if_entry_count && !build_failed; ++i) {
+              int written = wfbx_rx_if_detail_pack(if_payload + if_offset, if_payload_len - if_offset,
+                                                   &if_entries[i].detail, if_entries[i].chains);
+              if (written < 0) {
+                build_failed = true;
+                break;
+              }
+              if_offset += (size_t)written;
+            }
+            if (!build_failed) {
+              if (append_section(payload, &payload_off, sizeof(payload), WFBX_RX_SECTION_IF_DETAIL, if_payload, (uint16_t)if_payload_len) != 0) {
+                fprintf(stderr, "[STATS] RX IF detail append failed\n");
+                build_failed = true;
+              } else {
+                section_count++;
+              }
+            }
+          }
+        }
+      }
+
+      if (!build_failed) {
+        wfbx_rx_filter_info_t filters = {
+          .group_id = 0xFF,
+          .txf_mode = (uint8_t)cli.txf.mode,
+          .has_link_id = (cli.link_id >= 0) ? 1u : 0u,
+          .has_radio_port = (cli.radio_port >= 0) ? 1u : 0u,
+          .link_id = (int16_t)cli.link_id,
+          .radio_port = (int16_t)cli.radio_port,
+          .txf_spec = cli.tx_filter_spec
+        };
+        uint8_t filter_buf[512];
+        int filter_sz = wfbx_rx_filter_info_pack(filter_buf, sizeof(filter_buf), &filters);
+        if (filter_sz <= 0 || append_section(payload, &payload_off, sizeof(payload), WFBX_RX_SECTION_FILTERS, filter_buf, (uint16_t)filter_sz) != 0) {
+          fprintf(stderr, "[STATS] RX filter section append failed\n");
+          build_failed = true;
+        } else {
+          section_count++;
+        }
+      }
+
+      if (tx_payload) free(tx_payload);
+      if (if_payload) free(if_payload);
+
+      if (!build_failed && payload_off + WFBX_STATS_HEADER_SIZE <= WFBX_RX_STATS_MAX_PACKET) {
+        wfbx_stats_header_t header;
+        wfbx_stats_header_init(&header, 1, WFBX_MODULE_RX, g_rx_stats_module_id,
+                               NULL,
+                               g_rx_stats_tick_id++, mono_us_raw(), 0, section_count, (uint32_t)payload_off);
+        uint8_t header_buf[WFBX_STATS_HEADER_SIZE];
+        if (wfbx_stats_header_pack(header_buf, sizeof(header_buf), &header) == 0) {
+          memcpy(g_rx_stats_packet, header_buf, WFBX_STATS_HEADER_SIZE);
+          memcpy(g_rx_stats_packet + WFBX_STATS_HEADER_SIZE, payload, payload_off);
+          g_rx_stats_packet_len = WFBX_STATS_HEADER_SIZE + payload_off;
+          header.crc32 = wfbx_stats_crc32(g_rx_stats_packet, g_rx_stats_packet_len);
+          if (wfbx_stats_header_pack(header_buf, sizeof(header_buf), &header) == 0)
+            memcpy(g_rx_stats_packet, header_buf, WFBX_STATS_HEADER_SIZE);
+          if (stat_sock >= 0) {
+            stats_send_packet(stat_sock, &stat_addr);
+          } else {
+            fprintf(stderr, "[STATS] stat_sock < 0, skip send\n");
+          }
+        } else {
+          g_rx_stats_packet_len = 0;
+        }
+      } else {
+        if (build_failed)
+          fprintf(stderr, "[STATS] RX build_failed, skipping send\n");
+        else
+          fprintf(stderr, "[STATS] RX packet too large (%zu)\n", payload_off + WFBX_STATS_HEADER_SIZE);
+        g_rx_stats_packet_len = 0;
       }
 
       /* reset period (keep per-TX/iface/chain expect_seq across periods) */
@@ -859,11 +1182,15 @@ stats_tick:
         G[t].lost    = 0;     /* clear per-TX period losses */
         pkts_tx[t]   = 0;     /* clear per-TX period packets */
         bytes_tx[t]  = 0;     /* clear per-TX period bytes */
-        for (int a=0; a<n_open; ++a)
-          for (int c=0; c<RX_ANT_MAX; ++c) {
-            PC[t][a][c].lost = 0;          /* clear per-chain period losses (keep expect_seq) */
-            ant_stats_clear(&ATX[t][a][c]);/* clear per-chain RSSI stats */
-          }
+      for (int a=0; a<n_open; ++a)
+        for (int c=0; c<RX_ANT_MAX; ++c) {
+          PC[t][a][c].lost = 0;          /* clear per-chain period losses (keep expect_seq) */
+          ant_stats_clear(&ATX[t][a][c]);/* clear per-chain RSSI stats */
+        }
+      for (int a=0; a<n_open; ++a) {
+        IFSTAT[t][a].lost = 0;
+        IFSTAT[t][a].packets = 0;
+      }
       }
       
       rssi_min = 127; rssi_max = -127; rssi_sum = 0; rssi_samples = 0;
@@ -873,5 +1200,25 @@ stats_tick:
 
   for (int i=0;i<n_open;i++) if (ph[i]) pcap_close(ph[i]);
   close(us);
+  if (stat_sock >= 0) close(stat_sock);
   return 0;
+}
+
+static void stats_send_packet(int sock, const struct sockaddr_in* addr)
+{
+  if (sock < 0 || !addr) return;
+  if (g_rx_stats_packet_len == 0) return;
+  char ipbuf[INET_ADDRSTRLEN];
+  const char* ip = inet_ntop(AF_INET, &addr->sin_addr, ipbuf, sizeof(ipbuf));
+  if (!ip) ip = "?";
+  ssize_t sent = sendto(sock, g_rx_stats_packet, g_rx_stats_packet_len, 0,
+                        (const struct sockaddr*)addr, sizeof(*addr));
+  if (sent < 0) {
+    perror("stats sendto");
+    fprintf(stderr, "[STATS] sendto failed len=%zu dest=%s:%d\n",
+            g_rx_stats_packet_len, ip, ntohs(addr->sin_port));
+  } else {
+    fprintf(stderr, "[STATS] sendto ok sent=%zd len=%zu dest=%s:%d\n",
+            sent, g_rx_stats_packet_len, ip, ntohs(addr->sin_port));
+  }
 }
