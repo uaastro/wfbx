@@ -232,7 +232,11 @@ static int nl80211_get_frequency(const char* ifname)
     int freq_mhz = 0;
     int wiphy_id = -1;
     for (struct nlmsghdr* hdr = (struct nlmsghdr*)buf; NLMSG_OK(hdr, len); hdr = NLMSG_NEXT(hdr, len)) {
-        if (hdr->nlmsg_type == NLMSG_ERROR) return 0;
+        if (hdr->nlmsg_type == NLMSG_ERROR) {
+            struct nlmsgerr* err = (struct nlmsgerr*)NLMSG_DATA(hdr);
+            if (err->error == 0) continue;
+            return 0;
+        }
         if (hdr->nlmsg_type != g_nl_family_id) continue;
         struct genlmsghdr* gh = (struct genlmsghdr*)NLMSG_DATA(hdr);
         int attrlen = hdr->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
@@ -276,7 +280,11 @@ static int nl80211_get_frequency(const char* ifname)
             int len2 = recv(g_nl_sock, buf, sizeof(buf), 0);
             if (len2 >= 0) {
                 for (struct nlmsghdr* hdr2 = (struct nlmsghdr*)buf; NLMSG_OK(hdr2, len2); hdr2 = NLMSG_NEXT(hdr2, len2)) {
-                    if (hdr2->nlmsg_type == NLMSG_ERROR) break;
+                    if (hdr2->nlmsg_type == NLMSG_ERROR) {
+                        struct nlmsgerr* err2 = (struct nlmsgerr*)NLMSG_DATA(hdr2);
+                        if (err2->error == 0) continue;
+                        break;
+                    }
                     if (hdr2->nlmsg_type != g_nl_family_id) continue;
                     struct genlmsghdr* gh2 = (struct genlmsghdr*)NLMSG_DATA(hdr2);
                     int attrlen2 = hdr2->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
@@ -292,6 +300,8 @@ static int nl80211_get_frequency(const char* ifname)
             }
         }
     }
+#else
+    (void)wiphy_id;
 #endif
     return freq_mhz;
 }
