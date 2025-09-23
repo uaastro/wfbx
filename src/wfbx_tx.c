@@ -317,6 +317,10 @@ static uint64_t g_epoch_adj_count_period = 0;
 static uint64_t g_epoch_adj_abs_sum = 0;
 static uint64_t g_epoch_adj_abs_min = UINT64_MAX;
 static uint64_t g_epoch_adj_abs_max = 0;
+/* Bias for epoch drift (captured after first MX correction) */
+static pthread_mutex_t g_epoch_bias_mtx = PTHREAD_MUTEX_INITIALIZER;
+static int g_epoch_bias_set = 0;
+static int64_t g_epoch_bias_us = 0;
 
 static void uds_build_addr(const char* name_in, struct sockaddr_un* sa, socklen_t* sl_out, char* out_norm, size_t out_sz)
 {
@@ -730,10 +734,6 @@ static uint64_t g_slot_sent_min = UINT64_MAX;
 static uint64_t g_slot_sent_max = 0;
 static uint64_t g_slot_count    = 0;
 static pthread_mutex_t g_stat_mtx = PTHREAD_MUTEX_INITIALIZER;
-/* Bias for epoch drift (captured after first MX correction) */
-static pthread_mutex_t g_epoch_bias_mtx = PTHREAD_MUTEX_INITIALIZER;
-static int g_epoch_bias_set = 0;
-static int64_t g_epoch_bias_us = 0;
 /* Buffer-left-at-slot-end statistics over the reporting period */
 static uint64_t g_buf_left_sum = 0;
 static uint64_t g_buf_left_min = UINT64_MAX;
