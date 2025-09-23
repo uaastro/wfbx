@@ -362,6 +362,13 @@ def _two_row_table(labels: List[str], values: List[str], *, style_label: str = "
 def render_tx(record: ModuleRecord) -> Group:
     blocks: List = []
 
+    metrics_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+    columns = 5
+    for _ in range(columns):
+        metrics_table.add_column()
+    metrics_added = False
+    missing_summary = False
+
     if record.tx_summary is not None:
         ts = record.tx_summary
         labels = [
@@ -378,21 +385,32 @@ def render_tx(record: ModuleRecord) -> Group:
             f"{ts.sent_kbps_x10 / 10.0:.1f}",
             f"{ts.drop_overflow}",
         ]
-        blocks.append(_two_row_table(labels, values))
+        metrics_table.add_row(*[Text(lbl, style="cyan") for lbl in labels])
+        metrics_table.add_row(*[Text(val, style="bright_white") for val in values])
+        metrics_added = True
     else:
-        blocks.append(Text("TX summary unavailable", style="dim"))
+        missing_summary = True
 
     if record.tx_queue is not None:
         tq = record.tx_queue
-        labels = ["queue avg", "min", "max", "samples"]
-        values = [str(tq.avg), str(tq.min), str(tq.max), str(tq.samples)]
-        blocks.append(_two_row_table(labels, values, style_label="green", style_value="bright_black"))
+        labels = ["queue avg", "min", "max", "samples", ""]
+        values = [str(tq.avg), str(tq.min), str(tq.max), str(tq.samples), ""]
+        metrics_table.add_row(*[Text(lbl, style="green") if lbl else Text("") for lbl in labels])
+        metrics_table.add_row(*[Text(val, style="bright_black") if val else Text("") for val in values])
+        metrics_added = True
 
     if record.tx_slot is not None:
         tslt = record.tx_slot
-        labels = ["slot avg", "min", "max", "slots"]
-        values = [str(tslt.avg), str(tslt.min), str(tslt.max), str(tslt.slots)]
-        blocks.append(_two_row_table(labels, values, style_label="yellow", style_value="bright_black"))
+        labels = ["slot avg", "min", "max", "slots", ""]
+        values = [str(tslt.avg), str(tslt.min), str(tslt.max), str(tslt.slots), ""]
+        metrics_table.add_row(*[Text(lbl, style="yellow") if lbl else Text("") for lbl in labels])
+        metrics_table.add_row(*[Text(val, style="bright_black") if val else Text("") for val in values])
+        metrics_added = True
+
+    if metrics_added:
+        blocks.append(metrics_table)
+    if missing_summary:
+        blocks.append(Text("TX summary unavailable", style="dim"))
 
     if record.tx_epoch is not None:
         te = record.tx_epoch
