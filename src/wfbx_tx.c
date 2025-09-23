@@ -603,17 +603,6 @@ static void epoch_adjust_from_mx(uint64_t epoch_mx_us)
   pthread_mutex_unlock(&g_epoch.mtx);
 
   uint64_t new_cur = g_epoch_start_us;
-  uint64_t base_cur_snapshot = 0;
-  pthread_mutex_lock(&g_epoch_base.mtx);
-  base_cur_snapshot = g_epoch_base.cur_us;
-  pthread_mutex_unlock(&g_epoch_base.mtx);
-  pthread_mutex_lock(&g_epoch_bias_mtx);
-  if (!g_epoch_bias_set) {
-    int64_t bias = (int64_t)new_cur - (int64_t)base_cur_snapshot;
-    g_epoch_bias_us = bias;
-    g_epoch_bias_set = 1;
-  }
-  pthread_mutex_unlock(&g_epoch_bias_mtx);
 
   /* Count applied correction magnitude (absolute change of current epoch) */
   uint64_t abs_step = (new_cur > old_cur) ? (new_cur - old_cur) : (old_cur - new_cur);
@@ -910,13 +899,14 @@ static void* thr_sched(void* arg)
       cur_base_us = g_epoch_base.cur_us;
       pthread_mutex_unlock(&g_epoch_base.mtx);
       long long e_epoch_base = (long long)((int64_t)cur_epoch_us - (int64_t)cur_base_us);
-      int64_t epoch_bias = 0;
-      int bias_set = 0;
       pthread_mutex_lock(&g_epoch_bias_mtx);
-      bias_set = g_epoch_bias_set;
-      if (bias_set) epoch_bias = g_epoch_bias_us;
+      if (!g_epoch_bias_set) {
+        g_epoch_bias_us = e_epoch_base;
+        g_epoch_bias_set = 1;
+      }
+      int64_t epoch_bias = g_epoch_bias_us;
       pthread_mutex_unlock(&g_epoch_bias_mtx);
-      long long e_epoch_base_adj = e_epoch_base - (bias_set ? epoch_bias : 0);
+      long long e_epoch_base_adj = e_epoch_base - epoch_bias;
       fprintf(stderr, "[TX STAT] e_epoch=%lld us | mx_epoch_msgs=%llu | base_adv=%llu\n",
               e_epoch_base_adj,
               (unsigned long long)g_mx_epoch_msgs_period,
