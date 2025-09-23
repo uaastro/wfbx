@@ -11,7 +11,7 @@ LDFLAGS_COMMON=${LDFLAGS_COMMON:-""}
 #mkdir -p bin
 
 echo "[BUILD] wfbx_tx"
-$CC $CFLAGS -o ./bin/wfbx_tx ./src/wfbx_tx.c ./src/wfbx_stats_core.c $LDFLAGS_COMMON -lpcap -lpthread -lm
+$CC $CFLAGS -o ./bin/wfbx_tx ./src/wfbx_tx.c ./src/wfbx_stats_core.c ./src/wfbx_stats_tx.c $LDFLAGS_COMMON -lpcap -lpthread -lm
 
 echo "[BUILD] wfbx_rx"
 $CC $CFLAGS -o ./bin/wfbx_rx ./src/wfbx_rx.c $LDFLAGS_COMMON -lpcap
