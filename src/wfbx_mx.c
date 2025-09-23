@@ -230,6 +230,7 @@ static int nl80211_get_frequency(const char* ifname)
     if (len < 0) return 0;
 
     int freq_mhz = 0;
+    int wiphy_id = -1;
     for (struct nlmsghdr* hdr = (struct nlmsghdr*)buf; NLMSG_OK(hdr, len); hdr = NLMSG_NEXT(hdr, len)) {
         if (hdr->nlmsg_type == NLMSG_ERROR) return 0;
         if (hdr->nlmsg_type != g_nl_family_id) continue;
@@ -239,10 +240,59 @@ static int nl80211_get_frequency(const char* ifname)
         for (; NLA_OK(attr, attrlen); attr = NLA_NEXT(attr, attrlen)) {
             if (attr->nla_type == NL80211_ATTR_WIPHY_FREQ) {
                 freq_mhz = (int)nla_get_u32(attr);
-                break;
+            }
+            if (attr->nla_type == NL80211_ATTR_WIPHY) {
+                wiphy_id = (int)nla_get_u32(attr);
             }
         }
     }
+    if (freq_mhz > 0) return freq_mhz;
+#ifdef NL80211_CMD_GET_WIPHY
+    if (wiphy_id >= 0) {
+        memset(buf, 0, sizeof(buf));
+        struct nlmsghdr* nlh2 = (struct nlmsghdr*)buf;
+        struct genlmsghdr* genlh2 = (struct genlmsghdr*)(buf + NLMSG_HDRLEN);
+        struct nlattr* na2;
+
+        nlh2->nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+        nlh2->nlmsg_type = g_nl_family_id;
+        nlh2->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+        nlh2->nlmsg_seq = ++g_nl_seq;
+        nlh2->nlmsg_pid = 0;
+
+        genlh2->cmd = NL80211_CMD_GET_WIPHY;
+        genlh2->version = 0;
+
+        na2 = (struct nlattr*)((char*)genlh2 + GENL_HDRLEN);
+        na2->nla_type = NL80211_ATTR_WIPHY;
+        na2->nla_len = NLA_HDRLEN + sizeof(uint32_t);
+        memcpy(NLA_DATA(na2), &wiphy_id, sizeof(uint32_t));
+        nlh2->nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN + na2->nla_len);
+
+        struct sockaddr_nl dst2;
+        memset(&dst2, 0, sizeof(dst2));
+        dst2.nl_family = AF_NETLINK;
+        if (sendto(g_nl_sock, nlh2, nlh2->nlmsg_len, 0, (struct sockaddr*)&dst2, sizeof(dst2)) >= 0) {
+            int len2 = recv(g_nl_sock, buf, sizeof(buf), 0);
+            if (len2 >= 0) {
+                for (struct nlmsghdr* hdr2 = (struct nlmsghdr*)buf; NLMSG_OK(hdr2, len2); hdr2 = NLMSG_NEXT(hdr2, len2)) {
+                    if (hdr2->nlmsg_type == NLMSG_ERROR) break;
+                    if (hdr2->nlmsg_type != g_nl_family_id) continue;
+                    struct genlmsghdr* gh2 = (struct genlmsghdr*)NLMSG_DATA(hdr2);
+                    int attrlen2 = hdr2->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+                    struct nlattr* attr2 = (struct nlattr*)((char*)gh2 + GENL_HDRLEN);
+                    for (; NLA_OK(attr2, attrlen2); attr2 = NLA_NEXT(attr2, attrlen2)) {
+                        if (attr2->nla_type == NL80211_ATTR_WIPHY_FREQ) {
+                            freq_mhz = (int)nla_get_u32(attr2);
+                            break;
+                        }
+                    }
+                    if (freq_mhz > 0) break;
+                }
+            }
+        }
+    }
+#endif
     return freq_mhz;
 }
 #else
@@ -1218,7 +1268,9 @@ stats_tick:
         mx_if_entry_t if_entries[MX_MAX_IF_ENTRIES];
         size_t if_entry_count = 0;
         int iface_freq_mhz[MAX_IFS];
-        for (int i = 0; i < n_open; ++i) iface_freq_mhz[i] = nl80211_get_frequency(cli.ifname[i]);
+        for (int i = 0; i < n_open; ++i) {
+          iface_freq_mhz[i] = nl80211_get_frequency(cli.ifname[i]);
+        }
 
         for (int tX = 0; tX < MAX_TX_IDS; ++tX) {
           int tx_active = (TX[tX].pkts > 0) || (TXD[tX].unique_pkts > 0);
