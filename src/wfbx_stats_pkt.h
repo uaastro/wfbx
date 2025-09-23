@@ -7,5 +7,6 @@
 
 #include "wfbx_stats_core.h"
 #include "wfbx_stats_mx.h"
+#include "wfbx_stats_tx.h"
 
 #endif /* WFBX_STATS_PKT_H */

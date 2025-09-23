@@ -32,6 +32,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <math.h>
+#include <limits.h>
 
 #ifdef __linux__
   #include <endian.h>
@@ -60,9 +61,26 @@
 #endif
 
 #include "wfb_defs.h"
+#include "wfbx_stats_core.h"
+#include "wfbx_stats_tx.h"
 
 #define MAX_FRAME        4096
 #define MAX_UDP_PAYLOAD  2000
+
+#define WFBX_TX_STATS_MAX_PACKET 512
+
+static int            g_stat_sock = -1;
+static struct sockaddr_in g_stat_addr;
+static int            g_stat_enabled = 0;
+static uint8_t        g_stat_packet[WFBX_TX_STATS_MAX_PACKET];
+static size_t         g_stat_packet_len = 0;
+static uint32_t       g_stat_tick_id = 0;
+static char           g_stat_module_id[24] = "tx";
+static char           g_stat_host_id[16] = "";
+
+static int stats_append_section(uint8_t* dst, size_t* offset, size_t cap,
+                                uint16_t type, const uint8_t* data, uint16_t length);
+static void stats_send_packet(size_t len);
 
 /* ---- Radiotap TX header (packed) ---- */
 #pragma pack(push,1)
@@ -143,6 +161,39 @@ static size_t build_dot11(uint8_t* out, uint16_t seq, uint8_t group_id, uint8_t 
   h.seq_ctrl = htole16((uint16_t)((seq & 0x0fff) << 4));
   memcpy(out, &h, sizeof(h));
   return sizeof(h);
+}
+
+static int stats_append_section(uint8_t* dst, size_t* offset, size_t cap,
+                                uint16_t type, const uint8_t* data, uint16_t length)
+{
+  if (!dst || !offset) return -1;
+  if (*offset + 4u + (size_t)length > cap) return -1;
+  dst[*offset + 0] = (uint8_t)(type >> 8);
+  dst[*offset + 1] = (uint8_t)(type & 0xFF);
+  dst[*offset + 2] = (uint8_t)(length >> 8);
+  dst[*offset + 3] = (uint8_t)(length & 0xFF);
+  if (length > 0 && data) memcpy(dst + *offset + 4, data, length);
+  *offset += 4u + (size_t)length;
+  return 0;
+}
+
+static void stats_send_packet(size_t len)
+{
+  if (!g_stat_enabled || g_stat_sock < 0) return;
+  if (len == 0 || len > sizeof(g_stat_packet)) return;
+  char ipbuf[INET_ADDRSTRLEN];
+  const char* ip = inet_ntop(AF_INET, &g_stat_addr.sin_addr, ipbuf, sizeof(ipbuf));
+  if (!ip) ip = "?";
+  ssize_t sent = sendto(g_stat_sock, g_stat_packet, len, 0,
+                        (const struct sockaddr*)&g_stat_addr, sizeof(g_stat_addr));
+  if (sent < 0) {
+    perror("stats sendto");
+    fprintf(stderr, "[STATS] TX sendto failed len=%zu dest=%s:%d\n",
+            len, ip, ntohs(g_stat_addr.sin_port));
+  } else {
+    fprintf(stderr, "[STATS] TX sendto ok sent=%zd len=%zu dest=%s:%d\n",
+            sent, len, ip, ntohs(g_stat_addr.sin_port));
+  }
 }
 
 /* Forward declaration for send_packet used by scheduler */
@@ -660,6 +711,8 @@ static uint64_t g_sent_in_window = 0;
 static uint64_t g_drop_in_window = 0;
 static uint64_t g_tx_t0_ms = 0;
 static uint64_t g_sent_period = 0;
+static uint64_t g_rx_bytes_period = 0;
+static uint64_t g_sent_bytes_period = 0;
 static uint64_t g_slot_sent_sum = 0;
 static uint64_t g_slot_sent_min = UINT64_MAX;
 static uint64_t g_slot_sent_max = 0;
@@ -683,7 +736,10 @@ static void* thr_udp_rx(void* arg)
     if (n == 0) continue;
     dl_push_back_drop_oldest(&g_buf, buf, (size_t)n);
     /* Count only successfully received UDP datagrams */
+    pthread_mutex_lock(&g_stat_mtx);
     g_rx_count_period++;
+    g_rx_bytes_period += (uint64_t)n;
+    pthread_mutex_unlock(&g_stat_mtx);
   }
   return NULL;
 }
@@ -795,9 +851,15 @@ static void* thr_sched(void* arg)
     if (now_ms_tick - g_tx_t0_ms >= (uint64_t)g_stat_period_ms) {
       /* Summary once per period */
       uint64_t udp_rx = 0;
+      uint64_t udp_rx_bytes = 0;
+      uint64_t sent_bytes = 0;
       pthread_mutex_lock(&g_stat_mtx);
       udp_rx = g_rx_count_period;
       g_rx_count_period = 0;
+      udp_rx_bytes = g_rx_bytes_period;
+      g_rx_bytes_period = 0;
+      sent_bytes = g_sent_bytes_period;
+      g_sent_bytes_period = 0;
       pthread_mutex_unlock(&g_stat_mtx);
       uint64_t slot_avg = (g_slot_count > 0) ? (g_slot_sent_sum / g_slot_count) : 0;
       uint64_t slot_min = (g_slot_count > 0) ? g_slot_sent_min : 0;
@@ -806,10 +868,14 @@ static void* thr_sched(void* arg)
       uint64_t buf_min  = (g_buf_left_cnt > 0) ? g_buf_left_min : 0;
       uint64_t buf_max  = (g_buf_left_cnt > 0) ? g_buf_left_max : 0;
       /* Line 1: period udp_rx and sent (+ buffer overflow drops) */
-      fprintf(stderr, "[TX STAT] dt=%d ms | udp_rx=%llu | sent=%llu | drop_overflow=%llu |\n",
+      double rx_rate_kbps = (double)udp_rx_bytes * 8.0 / (double)g_stat_period_ms;
+      double tx_rate_kbps = (double)sent_bytes * 8.0 / (double)g_stat_period_ms;
+      fprintf(stderr, "[TX STAT] dt=%d ms | udp_rx=%llu (%.1f kbps) | sent=%llu (%.1f kbps) | drop_overflow=%llu |\n",
               g_stat_period_ms,
               (unsigned long long)udp_rx,
+              rx_rate_kbps,
               (unsigned long long)g_sent_period,
+              tx_rate_kbps,
               (unsigned long long)g_buf_drop_period);
       /* Line 2: buffer-left and per-slot send stats */
       fprintf(stderr, "[TX STAT] buf_left avg=%llu min=%llu max=%llu | slot_sent avg=%llu min=%llu max=%llu\n",
@@ -848,6 +914,136 @@ static void* thr_sched(void* arg)
                 (unsigned long long)g_epoch_adj_abs_max,
                 (unsigned long long)g_epoch_adj_count_period);
       }
+      wfbx_tx_summary_t tx_summary = {
+        .dt_ms = (uint32_t)g_stat_period_ms,
+        .udp_rx_packets = (uint32_t)udp_rx,
+        .udp_rx_kbps_x10 = (uint32_t)(rx_rate_kbps * 10.0),
+        .sent_packets = (uint32_t)g_sent_period,
+        .sent_kbps_x10 = (uint32_t)(tx_rate_kbps * 10.0),
+        .drop_overflow = (uint32_t)g_buf_drop_period,
+        .reserved0 = 0,
+        .reserved1 = 0,
+      };
+      wfbx_tx_queue_stats_t tx_queue = {
+        .avg = (uint32_t)buf_avg,
+        .min = (uint32_t)buf_min,
+        .max = (uint32_t)buf_max,
+        .samples = (uint32_t)g_buf_left_cnt,
+      };
+      wfbx_tx_slot_stats_t tx_slot = {
+        .avg = (uint32_t)slot_avg,
+        .min = (uint32_t)slot_min,
+        .max = (uint32_t)slot_max,
+        .slots = (uint32_t)g_slot_count,
+      };
+      wfbx_tx_epoch_stats_t tx_epoch = {
+        .e_epoch_base_us = (int32_t)e_epoch_base,
+        .mx_epoch_msgs = (uint32_t)g_mx_epoch_msgs_period,
+        .base_adv = (uint32_t)g_base_adv_period,
+        .base_step_avg_us = (uint32_t)(g_base_step_samples ? (g_base_step_sum / g_base_step_samples) : 0),
+        .base_step_min_us = (uint32_t)((g_base_step_samples > 0 && g_base_step_min != UINT64_MAX) ? g_base_step_min : 0),
+        .base_step_max_us = (uint32_t)(g_base_step_samples ? g_base_step_max : 0),
+        .base_step_samples = (uint32_t)g_base_step_samples,
+        .epoch_adj_count = (uint32_t)g_epoch_adj_count_period,
+        .epoch_adj_avg_us = (uint32_t)(g_epoch_adj_count_period ? (g_epoch_adj_abs_sum / g_epoch_adj_count_period) : 0),
+        .epoch_adj_min_us = (uint32_t)((g_epoch_adj_count_period > 0 && g_epoch_adj_abs_min != UINT64_MAX) ? g_epoch_adj_abs_min : 0),
+        .epoch_adj_max_us = (uint32_t)(g_epoch_adj_count_period ? g_epoch_adj_abs_max : 0),
+      };
+      uint8_t tx_summary_buf[sizeof(wfbx_tx_summary_t)];
+      int tx_summary_sz = wfbx_tx_summary_pack(tx_summary_buf, sizeof(tx_summary_buf), &tx_summary);
+      uint8_t tx_queue_buf[sizeof(wfbx_tx_queue_stats_t)];
+      int tx_queue_sz = wfbx_tx_queue_stats_pack(tx_queue_buf, sizeof(tx_queue_buf), &tx_queue);
+      uint8_t tx_slot_buf[sizeof(wfbx_tx_slot_stats_t)];
+      int tx_slot_sz = wfbx_tx_slot_stats_pack(tx_slot_buf, sizeof(tx_slot_buf), &tx_slot);
+      uint8_t tx_epoch_buf[sizeof(wfbx_tx_epoch_stats_t)];
+      int tx_epoch_sz = wfbx_tx_epoch_stats_pack(tx_epoch_buf, sizeof(tx_epoch_buf), &tx_epoch);
+
+      if (g_stat_enabled &&
+          tx_summary_sz > 0 && tx_queue_sz > 0 && tx_slot_sz > 0 && tx_epoch_sz > 0) {
+        uint8_t payload_buf[WFBX_TX_STATS_MAX_PACKET - WFBX_STATS_HEADER_SIZE];
+        size_t payload_off = 0;
+        uint16_t section_count = 0;
+        int build_failed = 0;
+        g_stat_packet_len = 0;
+
+        if (stats_append_section(payload_buf, &payload_off, sizeof(payload_buf),
+                                 WFBX_TX_SECTION_SUMMARY,
+                                 tx_summary_buf, (uint16_t)tx_summary_sz) != 0) {
+          fprintf(stderr, "[STATS] TX summary append failed\n");
+          build_failed = 1;
+        } else {
+          section_count++;
+        }
+        if (!build_failed &&
+            stats_append_section(payload_buf, &payload_off, sizeof(payload_buf),
+                                 WFBX_TX_SECTION_QUEUE,
+                                 tx_queue_buf, (uint16_t)tx_queue_sz) != 0) {
+          fprintf(stderr, "[STATS] TX queue append failed\n");
+          build_failed = 1;
+        } else if (!build_failed) {
+          section_count++;
+        }
+        if (!build_failed &&
+            stats_append_section(payload_buf, &payload_off, sizeof(payload_buf),
+                                 WFBX_TX_SECTION_SLOT,
+                                 tx_slot_buf, (uint16_t)tx_slot_sz) != 0) {
+          fprintf(stderr, "[STATS] TX slot append failed\n");
+          build_failed = 1;
+        } else if (!build_failed) {
+          section_count++;
+        }
+        if (!build_failed &&
+            stats_append_section(payload_buf, &payload_off, sizeof(payload_buf),
+                                 WFBX_TX_SECTION_EPOCH,
+                                 tx_epoch_buf, (uint16_t)tx_epoch_sz) != 0) {
+          fprintf(stderr, "[STATS] TX epoch append failed\n");
+          build_failed = 1;
+        } else if (!build_failed) {
+          section_count++;
+        }
+
+        if (!build_failed) {
+          if (payload_off + WFBX_STATS_HEADER_SIZE <= WFBX_TX_STATS_MAX_PACKET) {
+            wfbx_stats_header_t hdr;
+            uint64_t ts_us = mono_us_raw();
+            uint32_t tick = g_stat_tick_id++;
+            const char* host_id = (g_stat_host_id[0] != '\0') ? g_stat_host_id : NULL;
+            if (wfbx_stats_header_init(&hdr,
+                                       1,
+                                       WFBX_MODULE_TX,
+                                       g_stat_module_id,
+                                       host_id,
+                                       tick,
+                                       ts_us,
+                                       0,
+                                       section_count,
+                                       (uint32_t)payload_off) == 0) {
+              uint8_t header_buf[WFBX_STATS_HEADER_SIZE];
+              if (wfbx_stats_header_pack(header_buf, sizeof(header_buf), &hdr) == 0) {
+                memcpy(g_stat_packet, header_buf, WFBX_STATS_HEADER_SIZE);
+                memcpy(g_stat_packet + WFBX_STATS_HEADER_SIZE, payload_buf, payload_off);
+                size_t total_len = WFBX_STATS_HEADER_SIZE + payload_off;
+                hdr.crc32 = wfbx_stats_crc32(g_stat_packet, total_len);
+                if (wfbx_stats_header_pack(header_buf, sizeof(header_buf), &hdr) == 0) {
+                  memcpy(g_stat_packet, header_buf, WFBX_STATS_HEADER_SIZE);
+                  g_stat_packet_len = total_len;
+                  stats_send_packet(total_len);
+                } else {
+                  fprintf(stderr, "[STATS] TX header pack (crc) failed\n");
+                }
+              } else {
+                fprintf(stderr, "[STATS] TX header pack failed\n");
+              }
+            } else {
+              fprintf(stderr, "[STATS] TX header init failed\n");
+            }
+          } else {
+            fprintf(stderr, "[STATS] TX packet too large (%zu)\n",
+                    payload_off + WFBX_STATS_HEADER_SIZE);
+          }
+        }
+      }
+
       /* reset period counters */
       g_tx_t0_ms    = now_ms_tick;
       g_sent_period = 0;
@@ -966,6 +1162,9 @@ static void* thr_sched(void* arg)
       g_seq = (uint16_t)((g_seq + 1) & 0x0fff);
       g_sent_in_window++;
       g_sent_period++;
+      pthread_mutex_lock(&g_stat_mtx);
+      g_sent_bytes_period += (uint64_t)ret;
+      pthread_mutex_unlock(&g_stat_mtx);
       /* delta_us/tau_max_us are already reflected in guards and T_close; pace by airtime only */
       t_next_send = now + (uint64_t)A_us + (uint64_t)g_send_guard_us;
     }
@@ -1121,6 +1320,47 @@ int main(int argc, char** argv) {
   }
   const char* iface = argv[optind];
 
+  /* Prepare stats module metadata */
+  memset(g_stat_module_id, 0, sizeof(g_stat_module_id));
+  strncpy(g_stat_module_id, stat_id ? stat_id : "tx", sizeof(g_stat_module_id) - 1);
+  g_stat_module_id[sizeof(g_stat_module_id) - 1] = '\0';
+  memset(g_stat_host_id, 0, sizeof(g_stat_host_id));
+  const char* env_host = getenv("WFBX_STAT_HOST");
+  if (env_host && *env_host) {
+    strncpy(g_stat_host_id, env_host, sizeof(g_stat_host_id) - 1);
+    g_stat_host_id[sizeof(g_stat_host_id) - 1] = '\0';
+  } else {
+    char hostbuf[64];
+    if (gethostname(hostbuf, sizeof(hostbuf)) == 0) {
+      hostbuf[sizeof(hostbuf) - 1] = '\0';
+      strncpy(g_stat_host_id, hostbuf, sizeof(g_stat_host_id) - 1);
+      g_stat_host_id[sizeof(g_stat_host_id) - 1] = '\0';
+    }
+  }
+  g_stat_enabled = 0;
+  if (stat_port > 0 && stat_port <= 65535) {
+    memset(&g_stat_addr, 0, sizeof(g_stat_addr));
+    g_stat_addr.sin_family = AF_INET;
+    g_stat_addr.sin_port = htons((uint16_t)stat_port);
+    if (!inet_aton(stat_ip, &g_stat_addr.sin_addr)) {
+      fprintf(stderr, "[STATS] invalid stat_ip '%s' — TX stats disabled\n", stat_ip);
+    } else {
+      g_stat_sock = socket(AF_INET, SOCK_DGRAM, 0);
+      if (g_stat_sock < 0) {
+        perror("[STATS] socket");
+      } else {
+        g_stat_enabled = 1;
+        fprintf(stderr, "[STATS] TX stats -> %s:%d id=%s host=%s\n",
+                stat_ip,
+                stat_port,
+                g_stat_module_id,
+                (g_stat_host_id[0] != '\0') ? g_stat_host_id : "");
+      }
+    }
+  } else {
+    fprintf(stderr, "[STATS] stat_port=%d out of range — TX stats disabled\n", stat_port);
+  }
+
   /* open UDP socket and bind */
   int us = socket(AF_INET, SOCK_DGRAM, 0);
   if (us < 0) { perror("socket"); return 1; }
@@ -1206,6 +1446,10 @@ int main(int argc, char** argv) {
   if (g_cs >= 0) {
     close(g_cs);
     g_cs = -1;
+  }
+  if (g_stat_sock >= 0) {
+    close(g_stat_sock);
+    g_stat_sock = -1;
   }
   close(g_usock);
   return 0;

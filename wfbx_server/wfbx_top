@@ -21,6 +21,7 @@ from rich.text import Text
 
 from wfbxlib.stats import core as stats_core
 from wfbxlib.stats import mx as stats_mx
+from wfbxlib.stats import tx as stats_tx
 
 console = Console()
 
@@ -34,6 +35,10 @@ class ModuleRecord:
     tx_entries: List[stats_mx.TxSummary]
     if_entries: List[stats_mx.IfDetail]
     global_debug: Optional[stats_mx.GlobalDebug]
+    tx_summary: Optional[stats_tx.Summary]
+    tx_queue: Optional[stats_tx.QueueStats]
+    tx_slot: Optional[stats_tx.SlotStats]
+    tx_epoch: Optional[stats_tx.EpochStats]
     last_update: float
 
 
@@ -66,6 +71,10 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
     tx_entries: List[stats_mx.TxSummary] = []
     if_entries: List[stats_mx.IfDetail] = []
     global_debug: Optional[stats_mx.GlobalDebug] = None
+    tx_summary: Optional[stats_tx.Summary] = None
+    tx_queue: Optional[stats_tx.QueueStats] = None
+    tx_slot: Optional[stats_tx.SlotStats] = None
+    tx_epoch: Optional[stats_tx.EpochStats] = None
 
     for section_type, payload in sections:
         if section_type == stats_core.SectionType.SUMMARY:
@@ -95,8 +104,43 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
                     global_debug = stats_mx.GlobalDebug.unpack(payload)
                 except ValueError:
                     global_debug = None
+        elif header.module_type == stats_core.ModuleType.TX:
+            try:
+                tx_type = stats_tx.SectionType(section_type)
+            except ValueError:
+                continue
+            if tx_type == stats_tx.SectionType.SUMMARY:
+                try:
+                    tx_summary = stats_tx.Summary.unpack(payload)
+                except ValueError:
+                    tx_summary = None
+            elif tx_type == stats_tx.SectionType.QUEUE:
+                try:
+                    tx_queue = stats_tx.QueueStats.unpack(payload)
+                except ValueError:
+                    tx_queue = None
+            elif tx_type == stats_tx.SectionType.SLOT:
+                try:
+                    tx_slot = stats_tx.SlotStats.unpack(payload)
+                except ValueError:
+                    tx_slot = None
+            elif tx_type == stats_tx.SectionType.EPOCH:
+                try:
+                    tx_epoch = stats_tx.EpochStats.unpack(payload)
+                except ValueError:
+                    tx_epoch = None
 
-    return summary, text_preview, tx_entries, if_entries, global_debug
+    return (
+        summary,
+        text_preview,
+        tx_entries,
+        if_entries,
+        global_debug,
+        tx_summary,
+        tx_queue,
+        tx_slot,
+        tx_epoch,
+    )
 
 
 def detect_kind(header: stats_core.Header) -> str:
@@ -118,7 +162,17 @@ def detect_kind(header: stats_core.Header) -> str:
 
 def build_record(datagram: bytes, now: float) -> ModuleRecord:
     header, sections = stats_core.decode_packet(datagram, verify_crc=False)
-    summary, text_preview, tx_entries, if_entries, global_debug = parse_sections(header, sections)
+    (
+        summary,
+        text_preview,
+        tx_entries,
+        if_entries,
+        global_debug,
+        tx_summary,
+        tx_queue,
+        tx_slot,
+        tx_epoch,
+    ) = parse_sections(header, sections)
     host_id = header.host_id or "unknown"
     module_id = header.module_id or "unknown"
     key = f"{module_id}@{host_id}"
@@ -132,6 +186,10 @@ def build_record(datagram: bytes, now: float) -> ModuleRecord:
         tx_entries=tx_entries,
         if_entries=if_entries,
         global_debug=global_debug,
+        tx_summary=tx_summary,
+        tx_queue=tx_queue,
+        tx_slot=tx_slot,
+        tx_epoch=tx_epoch,
         last_update=now,
     )
 
@@ -294,6 +352,70 @@ def render_mx(record: ModuleRecord) -> Group:
     return Group(*blocks)
 
 
+def render_tx(record: ModuleRecord) -> Group:
+    blocks: List = [render_summary_table(record)]
+
+    if record.tx_summary is not None:
+        ts = record.tx_summary
+        throughput_table = Table.grid(expand=True)
+        throughput_table.add_column(style="cyan", justify="left")
+        throughput_table.add_column(style="bright_white", justify="right")
+        throughput_table.add_row("window ms", str(ts.dt_ms))
+        throughput_table.add_row("udp rx pkts", f"{ts.udp_rx_packets}")
+        throughput_table.add_row("udp rx kbps", f"{ts.udp_rx_kbps_x10 / 10.0:.1f}")
+        throughput_table.add_row("sent pkts", f"{ts.sent_packets}")
+        throughput_table.add_row("sent kbps", f"{ts.sent_kbps_x10 / 10.0:.1f}")
+        throughput_table.add_row("drop overflow", f"{ts.drop_overflow}")
+        blocks.append(Panel(throughput_table, title="throughput", border_style="magenta"))
+    else:
+        blocks.append(Text("TX summary unavailable", style="dim"))
+
+    if record.tx_queue is not None:
+        tq = record.tx_queue
+        queue_table = Table.grid(expand=True)
+        queue_table.add_column(style="cyan", justify="left")
+        queue_table.add_column(style="bright_white", justify="right")
+        queue_table.add_row("avg", str(tq.avg))
+        queue_table.add_row("min", str(tq.min))
+        queue_table.add_row("max", str(tq.max))
+        queue_table.add_row("samples", str(tq.samples))
+        blocks.append(Panel(queue_table, title="queue depth", border_style="green"))
+
+    if record.tx_slot is not None:
+        tslt = record.tx_slot
+        slot_table = Table.grid(expand=True)
+        slot_table.add_column(style="cyan", justify="left")
+        slot_table.add_column(style="bright_white", justify="right")
+        slot_table.add_row("avg", str(tslt.avg))
+        slot_table.add_row("min", str(tslt.min))
+        slot_table.add_row("max", str(tslt.max))
+        slot_table.add_row("slots", str(tslt.slots))
+        blocks.append(Panel(slot_table, title="slot sent", border_style="yellow"))
+
+    if record.tx_epoch is not None:
+        te = record.tx_epoch
+        epoch_table = Table.grid(expand=True)
+        epoch_table.add_column(style="cyan", justify="left")
+        epoch_table.add_column(style="bright_white", justify="right")
+        epoch_table.add_row("e_epoch_base_us", str(te.e_epoch_base_us))
+        epoch_table.add_row("mx_epoch_msgs", str(te.mx_epoch_msgs))
+        epoch_table.add_row("base_adv", str(te.base_adv))
+        epoch_table.add_row("base_step_avg_us", str(te.base_step_avg_us))
+        epoch_table.add_row("base_step_min_us", str(te.base_step_min_us))
+        epoch_table.add_row("base_step_max_us", str(te.base_step_max_us))
+        epoch_table.add_row("base_step_samples", str(te.base_step_samples))
+        epoch_table.add_row("epoch_adj_count", str(te.epoch_adj_count))
+        epoch_table.add_row("epoch_adj_avg_us", str(te.epoch_adj_avg_us))
+        epoch_table.add_row("epoch_adj_min_us", str(te.epoch_adj_min_us))
+        epoch_table.add_row("epoch_adj_max_us", str(te.epoch_adj_max_us))
+        blocks.append(Panel(epoch_table, title="epoch control", border_style="blue"))
+
+    if record.text_preview:
+        blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
+
+    return Group(*blocks)
+
+
 def render_generic(record: ModuleRecord, label: str) -> Group:
     blocks: List = [render_summary_table(record)]
     if record.text_preview:
@@ -333,7 +455,7 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
     elif record.kind in {"rx", "xrx", "rxx"}:
         body = render_generic(record, "rx")
     elif record.kind in {"tx", "xtx"}:
-        body = render_generic(record, "tx")
+        body = render_tx(record)
     else:
         body = render_generic(record, "stat")
     return Panel(body, title=title, subtitle=subtitle, border_style="green")
