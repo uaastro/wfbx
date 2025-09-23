@@ -386,13 +386,13 @@ def render_tx(record: ModuleRecord) -> Group:
         tq = record.tx_queue
         labels = ["queue avg", "min", "max", "samples"]
         values = [str(tq.avg), str(tq.min), str(tq.max), str(tq.samples)]
-        blocks.append(_two_row_table(labels, values, style_label="green"))
+        blocks.append(_two_row_table(labels, values, style_label="green", style_value="bright_black"))
 
     if record.tx_slot is not None:
         tslt = record.tx_slot
         labels = ["slot avg", "min", "max", "slots"]
         values = [str(tslt.avg), str(tslt.min), str(tslt.max), str(tslt.slots)]
-        blocks.append(_two_row_table(labels, values, style_label="yellow"))
+        blocks.append(_two_row_table(labels, values, style_label="yellow", style_value="bright_black"))
 
     if record.tx_epoch is not None:
         te = record.tx_epoch
@@ -414,7 +414,7 @@ def render_tx(record: ModuleRecord) -> Group:
             str(te.epoch_adj_count),
             str(te.epoch_adj_avg_us),
         ]
-        blocks.append(_two_row_table(labels, values, style_label="blue"))
+        blocks.append(_two_row_table(labels, values, style_label="blue", style_value="bright_black"))
 
     if record.text_preview:
         blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
