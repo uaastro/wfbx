@@ -598,8 +598,20 @@ static void epoch_adjust_from_mx(uint64_t epoch_mx_us)
   g_epoch_start_us = g_epoch.cur_us;
   pthread_mutex_unlock(&g_epoch.mtx);
 
-  /* Count applied correction magnitude (absolute change of current epoch) */
   uint64_t new_cur = g_epoch_start_us;
+  uint64_t base_cur_snapshot = 0;
+  pthread_mutex_lock(&g_epoch_base.mtx);
+  base_cur_snapshot = g_epoch_base.cur_us;
+  pthread_mutex_unlock(&g_epoch_base.mtx);
+  pthread_mutex_lock(&g_epoch_bias_mtx);
+  if (!g_epoch_bias_set) {
+    int64_t bias = (int64_t)new_cur - (int64_t)base_cur_snapshot;
+    g_epoch_bias_us = bias;
+    g_epoch_bias_set = 1;
+  }
+  pthread_mutex_unlock(&g_epoch_bias_mtx);
+
+  /* Count applied correction magnitude (absolute change of current epoch) */
   uint64_t abs_step = (new_cur > old_cur) ? (new_cur - old_cur) : (old_cur - new_cur);
   if (abs_step > 0) {
     g_epoch_adj_count_period++;
@@ -717,6 +729,10 @@ static uint64_t g_slot_sent_min = UINT64_MAX;
 static uint64_t g_slot_sent_max = 0;
 static uint64_t g_slot_count    = 0;
 static pthread_mutex_t g_stat_mtx = PTHREAD_MUTEX_INITIALIZER;
+/* Bias for epoch drift (captured after first MX correction) */
+static pthread_mutex_t g_epoch_bias_mtx = PTHREAD_MUTEX_INITIALIZER;
+static int g_epoch_bias_set = 0;
+static int64_t g_epoch_bias_us = 0;
 /* Buffer-left-at-slot-end statistics over the reporting period */
 static uint64_t g_buf_left_sum = 0;
 static uint64_t g_buf_left_min = UINT64_MAX;
@@ -893,8 +909,15 @@ static void* thr_sched(void* arg)
       cur_base_us = g_epoch_base.cur_us;
       pthread_mutex_unlock(&g_epoch_base.mtx);
       long long e_epoch_base = (long long)((int64_t)cur_epoch_us - (int64_t)cur_base_us);
-      fprintf(stderr, "[TX STAT] e_epoch_base=%lld us | mx_epoch_msgs=%llu | base_adv=%llu\n",
-              e_epoch_base,
+      int64_t epoch_bias = 0;
+      int bias_set = 0;
+      pthread_mutex_lock(&g_epoch_bias_mtx);
+      bias_set = g_epoch_bias_set;
+      if (bias_set) epoch_bias = g_epoch_bias_us;
+      pthread_mutex_unlock(&g_epoch_bias_mtx);
+      long long e_epoch_base_adj = e_epoch_base - (bias_set ? epoch_bias : 0);
+      fprintf(stderr, "[TX STAT] e_epoch=%lld us | mx_epoch_msgs=%llu | base_adv=%llu\n",
+              e_epoch_base_adj,
               (unsigned long long)g_mx_epoch_msgs_period,
               (unsigned long long)g_base_adv_period);
       if (g_base_step_samples > 0) {
@@ -936,7 +959,7 @@ static void* thr_sched(void* arg)
         .slots = (uint32_t)g_slot_count,
       };
       wfbx_tx_epoch_stats_t tx_epoch = {
-        .e_epoch_base_us = (int32_t)e_epoch_base,
+        .e_epoch_base_us = (int32_t)e_epoch_base_adj,
         .mx_epoch_msgs = (uint32_t)g_mx_epoch_msgs_period,
         .base_adv = (uint32_t)g_base_adv_period,
         .base_step_avg_us = (uint32_t)(g_base_step_samples ? (g_base_step_sum / g_base_step_samples) : 0),
