@@ -37,6 +37,7 @@
 #include <time.h>
 #include <limits.h>
 #include <ctype.h>
+#include <math.h>
 #include <stdbool.h>
 
 #ifdef __linux__
