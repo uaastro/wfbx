@@ -57,7 +57,7 @@ class TxSummary:
 
 
 IF_DETAIL_STRUCT = struct.Struct(
-    ">BBBBIIHh"
+    ">BBBBIIHhHH"
 )
 
 
@@ -105,6 +105,7 @@ class IfDetail:
     lost: int
     quality_permille: int
     best_chain_rssi_q8: int
+    freq_mhz: int = 0
 
     def pack(self) -> bytes:
         header = IF_DETAIL_STRUCT.pack(
@@ -116,6 +117,8 @@ class IfDetail:
             self.lost,
             self.quality_permille,
             self.best_chain_rssi_q8,
+            self.freq_mhz,
+            0,
         )
         chain_payload = b"".join(chain.pack() for chain in self.chains)
         return header + chain_payload
@@ -124,7 +127,7 @@ class IfDetail:
     def unpack(cls, data: bytes) -> "IfDetail":
         if len(data) < IF_DETAIL_STRUCT.size:
             raise ValueError("if detail header truncated")
-        tx_id, iface_id, chain_count, _reserved, packets, lost, quality_permille, best_rssi = IF_DETAIL_STRUCT.unpack(
+        tx_id, iface_id, chain_count, _reserved0, packets, lost, quality_permille, best_rssi, freq_mhz, _reserved1 = IF_DETAIL_STRUCT.unpack(
             data[: IF_DETAIL_STRUCT.size]
         )
         chains: List[ChainDetail] = []
@@ -141,6 +144,7 @@ class IfDetail:
             lost=lost,
             quality_permille=quality_permille,
             best_chain_rssi_q8=best_rssi,
+            freq_mhz=freq_mhz,
         )
 
 

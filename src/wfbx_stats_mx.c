@@ -79,11 +79,13 @@ int wfbx_mx_if_detail_pack(uint8_t* dst, size_t dst_len, const wfbx_mx_if_detail
     dst[0] = hdr->tx_id;
     dst[1] = hdr->iface_id;
     dst[2] = hdr->chain_count;
-    dst[3] = 0;
+    dst[3] = hdr->reserved0;
     store_u32(dst + 4, hdr->packets);
     store_u32(dst + 8, hdr->lost);
     store_u16(dst + 12, hdr->quality_permille);
     store_i16(dst + 14, hdr->best_chain_rssi_q8);
+    store_u16(dst + 16, hdr->freq_mhz);
+    store_u16(dst + 18, hdr->reserved1);
     uint8_t* p = dst + sizeof(wfbx_mx_if_detail_t);
     for (uint8_t i = 0; i < hdr->chain_count; ++i) {
         if (pack_chain(p, dst + needed - p, &chains[i]) < 0) return -1;

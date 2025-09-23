@@ -31,6 +31,12 @@
 #include <unistd.h>
 #include <time.h>
 #include <ctype.h>
+#ifdef __linux__
+#include <linux/netlink.h>
+#include <linux/genetlink.h>
+#include <linux/nl80211.h>
+#include <net/if.h>
+#endif
 #include <strings.h>
 #include <sys/un.h>
 #include <fcntl.h>
@@ -79,6 +85,158 @@ static uint64_t now_ms(void) {
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
+
+#ifdef __linux__
+static int g_nl_sock = -1;
+static int g_nl_family_id = 0;
+static uint32_t g_nl_seq = 0;
+
+#ifndef NLA_DATA
+#define NLA_DATA(nla) ((void*)((char*)(nla) + NLA_HDRLEN))
+#endif
+
+static uint16_t nla_get_u16(const struct nlattr* nla)
+{
+    uint16_t val;
+    memcpy(&val, NLA_DATA(nla), sizeof(val));
+    return val;
+}
+
+static uint32_t nla_get_u32(const struct nlattr* nla)
+{
+    uint32_t val;
+    memcpy(&val, NLA_DATA(nla), sizeof(val));
+    return val;
+}
+
+static int nl80211_open_socket(void)
+{
+    if (g_nl_sock >= 0) return 0;
+    g_nl_sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
+    if (g_nl_sock < 0) return -1;
+    struct sockaddr_nl addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.nl_family = AF_NETLINK;
+    if (bind(g_nl_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(g_nl_sock);
+        g_nl_sock = -1;
+        return -1;
+    }
+    return 0;
+}
+
+static int nl80211_resolve_family(void)
+{
+    if (g_nl_family_id > 0) return g_nl_family_id;
+    if (nl80211_open_socket() != 0) return -1;
+
+    char buf[4096];
+    memset(buf, 0, sizeof(buf));
+    struct nlmsghdr* nlh = (struct nlmsghdr*)buf;
+    struct genlmsghdr* genlh = (struct genlmsghdr*)(buf + NLMSG_HDRLEN);
+    struct nlattr* na;
+
+    nlh->nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+    nlh->nlmsg_type = GENL_ID_CTRL;
+    nlh->nlmsg_flags = NLM_F_REQUEST;
+    nlh->nlmsg_seq = ++g_nl_seq;
+    nlh->nlmsg_pid = 0;
+
+    genlh->cmd = CTRL_CMD_GETFAMILY;
+    genlh->version = 1;
+
+    na = (struct nlattr*)((char*)genlh + GENL_HDRLEN);
+    na->nla_type = CTRL_ATTR_FAMILY_NAME;
+    const char family_name[] = "nl80211";
+    size_t name_len = sizeof(family_name);
+    na->nla_len = NLA_HDRLEN + name_len;
+    memcpy((char*)NLA_DATA(na), family_name, name_len);
+    nlh->nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN + na->nla_len);
+
+    struct sockaddr_nl dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.nl_family = AF_NETLINK;
+    if (sendto(g_nl_sock, nlh, nlh->nlmsg_len, 0, (struct sockaddr*)&dst, sizeof(dst)) < 0)
+        return -1;
+
+    int len = recv(g_nl_sock, buf, sizeof(buf), 0);
+    if (len < 0) return -1;
+
+    for (struct nlmsghdr* hdr = (struct nlmsghdr*)buf; NLMSG_OK(hdr, len); hdr = NLMSG_NEXT(hdr, len)) {
+        if (hdr->nlmsg_type == NLMSG_ERROR) return -1;
+        struct genlmsghdr* gh = (struct genlmsghdr*)NLMSG_DATA(hdr);
+        int attrlen = hdr->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+        struct nlattr* attr = (struct nlattr*)((char*)gh + GENL_HDRLEN);
+        for (; NLA_OK(attr, attrlen); attr = NLA_NEXT(attr, attrlen)) {
+            if (attr->nla_type == CTRL_ATTR_FAMILY_ID) {
+                g_nl_family_id = nla_get_u16(attr);
+                return g_nl_family_id;
+            }
+        }
+    }
+    return -1;
+}
+
+static int nl80211_get_frequency(const char* ifname)
+{
+    if (!ifname) return 0;
+    if (nl80211_resolve_family() <= 0) return 0;
+    int ifindex = if_nametoindex(ifname);
+    if (ifindex == 0) return 0;
+
+    char buf[4096];
+    memset(buf, 0, sizeof(buf));
+    struct nlmsghdr* nlh = (struct nlmsghdr*)buf;
+    struct genlmsghdr* genlh = (struct genlmsghdr*)(buf + NLMSG_HDRLEN);
+    struct nlattr* na;
+
+    nlh->nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN);
+    nlh->nlmsg_type = g_nl_family_id;
+    nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    nlh->nlmsg_seq = ++g_nl_seq;
+    nlh->nlmsg_pid = 0;
+
+    genlh->cmd = NL80211_CMD_GET_INTERFACE;
+    genlh->version = 0;
+
+    na = (struct nlattr*)((char*)genlh + GENL_HDRLEN);
+    na->nla_type = NL80211_ATTR_IFINDEX;
+    na->nla_len = NLA_HDRLEN + sizeof(uint32_t);
+    memcpy(NLA_DATA(na), &ifindex, sizeof(uint32_t));
+    nlh->nlmsg_len = NLMSG_LENGTH(GENL_HDRLEN + na->nla_len);
+
+    struct sockaddr_nl dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.nl_family = AF_NETLINK;
+    if (sendto(g_nl_sock, nlh, nlh->nlmsg_len, 0, (struct sockaddr*)&dst, sizeof(dst)) < 0)
+        return 0;
+
+    int len = recv(g_nl_sock, buf, sizeof(buf), 0);
+    if (len < 0) return 0;
+
+    int freq_mhz = 0;
+    for (struct nlmsghdr* hdr = (struct nlmsghdr*)buf; NLMSG_OK(hdr, len); hdr = NLMSG_NEXT(hdr, len)) {
+        if (hdr->nlmsg_type == NLMSG_ERROR) return 0;
+        if (hdr->nlmsg_type != g_nl_family_id) continue;
+        struct genlmsghdr* gh = (struct genlmsghdr*)NLMSG_DATA(hdr);
+        int attrlen = hdr->nlmsg_len - NLMSG_LENGTH(GENL_HDRLEN);
+        struct nlattr* attr = (struct nlattr*)((char*)gh + GENL_HDRLEN);
+        for (; NLA_OK(attr, attrlen); attr = NLA_NEXT(attr, attrlen)) {
+            if (attr->nla_type == NL80211_ATTR_WIPHY_FREQ) {
+                freq_mhz = (int)nla_get_u32(attr);
+                break;
+            }
+        }
+    }
+    return freq_mhz;
+}
+#else
+static int nl80211_get_frequency(const char* ifname)
+{
+    (void)ifname;
+    return 0;
+}
+#endif
 
 static inline uint64_t mono_us_raw(void) {
   struct timespec ts;
@@ -1044,6 +1202,8 @@ stats_tick:
         size_t tx_entry_count = 0;
         mx_if_entry_t if_entries[MX_MAX_IF_ENTRIES];
         size_t if_entry_count = 0;
+        int iface_freq_mhz[MAX_IFS];
+        for (int i = 0; i < n_open; ++i) iface_freq_mhz[i] = nl80211_get_frequency(cli.ifname[i]);
 
         for (int tX = 0; tX < MAX_TX_IDS; ++tX) {
           int tx_active = (TX[tX].pkts > 0) || (TXD[tX].unique_pkts > 0);
@@ -1095,9 +1255,12 @@ stats_tick:
             if_entry->detail.iface_id = (uint8_t)i2;
             if_entry->detail.packets = D->pkts;
             if_entry->detail.lost = D->lost;
+            if_entry->detail.reserved0 = 0;
             uint64_t exp_total = (uint64_t)D->pkts + (uint64_t)D->lost;
             double qlt = (exp_total > 0) ? ((double)D->pkts * 1000.0 / (double)exp_total) : 1000.0;
             if_entry->detail.quality_permille = clamp_permille((int)lrint(qlt));
+            if_entry->detail.freq_mhz = (uint16_t)(iface_freq_mhz[i2]);
+            if_entry->detail.reserved1 = 0;
             int best_chain_avg_if = -127;
             for (int c = 0; c < RX_ANT_MAX; ++c) {
               struct ant_stats* AS = &D->ant[c];

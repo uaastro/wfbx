@@ -35,11 +35,13 @@ typedef struct {
     uint8_t tx_id;
     uint8_t iface_id;
     uint8_t chain_count;
-    uint8_t reserved;
+    uint8_t reserved0;
     uint32_t packets;
     uint32_t lost;
     uint16_t quality_permille;
     int16_t  best_chain_rssi_q8;
+    uint16_t freq_mhz;
+    uint16_t reserved1;
     /* Followed by chain_count entries of wfbx_mx_chain_detail_t */
 } wfbx_mx_if_detail_t;
 
