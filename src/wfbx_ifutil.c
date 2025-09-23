@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <math.h>
+#include <stdint.h>
 
 #include <linux/netlink.h>
 #include <linux/genetlink.h>
