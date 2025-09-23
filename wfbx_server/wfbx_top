@@ -365,7 +365,6 @@ def render_tx(record: ModuleRecord) -> Group:
     if record.tx_summary is not None:
         ts = record.tx_summary
         labels = [
-            "window ms",
             "udp rx pkts",
             "udp rx kbps",
             "sent pkts",
@@ -373,7 +372,6 @@ def render_tx(record: ModuleRecord) -> Group:
             "drop overflow",
         ]
         values = [
-            str(ts.dt_ms),
             f"{ts.udp_rx_packets}",
             f"{ts.udp_rx_kbps_x10 / 10.0:.1f}",
             f"{ts.sent_packets}",
@@ -403,26 +401,18 @@ def render_tx(record: ModuleRecord) -> Group:
             "mx_epoch_msgs",
             "base_adv",
             "base_step_avg_us",
-            "base_step_min_us",
-            "base_step_max_us",
             "base_step_samples",
             "epoch_adj_count",
             "epoch_adj_avg_us",
-            "epoch_adj_min_us",
-            "epoch_adj_max_us",
         ]
         values = [
             str(te.e_epoch_base_us),
             str(te.mx_epoch_msgs),
             str(te.base_adv),
             str(te.base_step_avg_us),
-            str(te.base_step_min_us),
-            str(te.base_step_max_us),
             str(te.base_step_samples),
             str(te.epoch_adj_count),
             str(te.epoch_adj_avg_us),
-            str(te.epoch_adj_min_us),
-            str(te.epoch_adj_max_us),
         ]
         blocks.append(_two_row_table(labels, values, style_label="blue"))
 
