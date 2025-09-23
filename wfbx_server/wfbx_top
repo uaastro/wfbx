@@ -352,63 +352,79 @@ def render_mx(record: ModuleRecord) -> Group:
     return Group(*blocks)
 
 
+def _two_row_table(labels: List[str], values: List[str], *, style_label: str = "cyan", style_value: str = "bright_white") -> Table:
+    table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+    table.add_row(*[Text(label, style=style_label) for label in labels])
+    table.add_row(*[Text(val, style=style_value) for val in values])
+    return table
+
+
 def render_tx(record: ModuleRecord) -> Group:
-    blocks: List = [render_summary_table(record)]
+    blocks: List = []
 
     if record.tx_summary is not None:
         ts = record.tx_summary
-        throughput_table = Table.grid(expand=True)
-        throughput_table.add_column(style="cyan", justify="left")
-        throughput_table.add_column(style="bright_white", justify="right")
-        throughput_table.add_row("window ms", str(ts.dt_ms))
-        throughput_table.add_row("udp rx pkts", f"{ts.udp_rx_packets}")
-        throughput_table.add_row("udp rx kbps", f"{ts.udp_rx_kbps_x10 / 10.0:.1f}")
-        throughput_table.add_row("sent pkts", f"{ts.sent_packets}")
-        throughput_table.add_row("sent kbps", f"{ts.sent_kbps_x10 / 10.0:.1f}")
-        throughput_table.add_row("drop overflow", f"{ts.drop_overflow}")
-        blocks.append(Panel(throughput_table, title="throughput", border_style="magenta"))
+        labels = [
+            "window ms",
+            "udp rx pkts",
+            "udp rx kbps",
+            "sent pkts",
+            "sent kbps",
+            "drop overflow",
+        ]
+        values = [
+            str(ts.dt_ms),
+            f"{ts.udp_rx_packets}",
+            f"{ts.udp_rx_kbps_x10 / 10.0:.1f}",
+            f"{ts.sent_packets}",
+            f"{ts.sent_kbps_x10 / 10.0:.1f}",
+            f"{ts.drop_overflow}",
+        ]
+        blocks.append(_two_row_table(labels, values))
     else:
         blocks.append(Text("TX summary unavailable", style="dim"))
 
     if record.tx_queue is not None:
         tq = record.tx_queue
-        queue_table = Table.grid(expand=True)
-        queue_table.add_column(style="cyan", justify="left")
-        queue_table.add_column(style="bright_white", justify="right")
-        queue_table.add_row("avg", str(tq.avg))
-        queue_table.add_row("min", str(tq.min))
-        queue_table.add_row("max", str(tq.max))
-        queue_table.add_row("samples", str(tq.samples))
-        blocks.append(Panel(queue_table, title="queue depth", border_style="green"))
+        labels = ["queue avg", "min", "max", "samples"]
+        values = [str(tq.avg), str(tq.min), str(tq.max), str(tq.samples)]
+        blocks.append(_two_row_table(labels, values, style_label="green"))
 
     if record.tx_slot is not None:
         tslt = record.tx_slot
-        slot_table = Table.grid(expand=True)
-        slot_table.add_column(style="cyan", justify="left")
-        slot_table.add_column(style="bright_white", justify="right")
-        slot_table.add_row("avg", str(tslt.avg))
-        slot_table.add_row("min", str(tslt.min))
-        slot_table.add_row("max", str(tslt.max))
-        slot_table.add_row("slots", str(tslt.slots))
-        blocks.append(Panel(slot_table, title="slot sent", border_style="yellow"))
+        labels = ["slot avg", "min", "max", "slots"]
+        values = [str(tslt.avg), str(tslt.min), str(tslt.max), str(tslt.slots)]
+        blocks.append(_two_row_table(labels, values, style_label="yellow"))
 
     if record.tx_epoch is not None:
         te = record.tx_epoch
-        epoch_table = Table.grid(expand=True)
-        epoch_table.add_column(style="cyan", justify="left")
-        epoch_table.add_column(style="bright_white", justify="right")
-        epoch_table.add_row("e_epoch_base_us", str(te.e_epoch_base_us))
-        epoch_table.add_row("mx_epoch_msgs", str(te.mx_epoch_msgs))
-        epoch_table.add_row("base_adv", str(te.base_adv))
-        epoch_table.add_row("base_step_avg_us", str(te.base_step_avg_us))
-        epoch_table.add_row("base_step_min_us", str(te.base_step_min_us))
-        epoch_table.add_row("base_step_max_us", str(te.base_step_max_us))
-        epoch_table.add_row("base_step_samples", str(te.base_step_samples))
-        epoch_table.add_row("epoch_adj_count", str(te.epoch_adj_count))
-        epoch_table.add_row("epoch_adj_avg_us", str(te.epoch_adj_avg_us))
-        epoch_table.add_row("epoch_adj_min_us", str(te.epoch_adj_min_us))
-        epoch_table.add_row("epoch_adj_max_us", str(te.epoch_adj_max_us))
-        blocks.append(Panel(epoch_table, title="epoch control", border_style="blue"))
+        labels = [
+            "e_epoch_base_us",
+            "mx_epoch_msgs",
+            "base_adv",
+            "base_step_avg_us",
+            "base_step_min_us",
+            "base_step_max_us",
+            "base_step_samples",
+            "epoch_adj_count",
+            "epoch_adj_avg_us",
+            "epoch_adj_min_us",
+            "epoch_adj_max_us",
+        ]
+        values = [
+            str(te.e_epoch_base_us),
+            str(te.mx_epoch_msgs),
+            str(te.base_adv),
+            str(te.base_step_avg_us),
+            str(te.base_step_min_us),
+            str(te.base_step_max_us),
+            str(te.base_step_samples),
+            str(te.epoch_adj_count),
+            str(te.epoch_adj_avg_us),
+            str(te.epoch_adj_min_us),
+            str(te.epoch_adj_max_us),
+        ]
+        blocks.append(_two_row_table(labels, values, style_label="blue"))
 
     if record.text_preview:
         blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
@@ -444,6 +460,10 @@ def render_signal_bar_text(rssi: float, glyph: str = "❘") -> Text:
 def render_module(record: ModuleRecord, now: float) -> Panel:
     age = now - record.last_update
     if record.kind == "mx":
+        host = record.header.host_id or "-"
+        module = record.header.module_id or "unknown"
+        title = f"{host}.{module}"
+    elif record.kind in {"tx", "xtx"}:
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
