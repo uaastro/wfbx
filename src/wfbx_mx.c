@@ -36,6 +36,21 @@
 #include <linux/genetlink.h>
 #include <linux/nl80211.h>
 #include <net/if.h>
+#ifndef NLA_ALIGNTO
+#define NLA_ALIGNTO 4
+#endif
+#ifndef NLA_ALIGN
+#define NLA_ALIGN(len) (((len) + NLA_ALIGNTO - 1) & ~(NLA_ALIGNTO - 1))
+#endif
+#ifndef NLA_OK
+#define NLA_OK(nla, len) ((len) >= (int)sizeof(struct nlattr) && \
+                          (nla)->nla_len >= sizeof(struct nlattr) && \
+                          (nla)->nla_len <= (len))
+#endif
+#ifndef NLA_NEXT
+#define NLA_NEXT(nla, len) ((len) -= NLA_ALIGN((nla)->nla_len), \
+                            (struct nlattr*)(((char*)(nla)) + NLA_ALIGN((nla)->nla_len)))
+#endif
 #endif
 #include <strings.h>
 #include <sys/un.h>
