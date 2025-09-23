@@ -76,7 +76,6 @@ static uint8_t        g_stat_packet[WFBX_TX_STATS_MAX_PACKET];
 static size_t         g_stat_packet_len = 0;
 static uint32_t       g_stat_tick_id = 0;
 static char           g_stat_module_id[24] = "tx";
-static char           g_stat_host_id[16] = "";
 
 static int stats_append_section(uint8_t* dst, size_t* offset, size_t cap,
                                 uint16_t type, const uint8_t* data, uint16_t length);
@@ -1007,12 +1006,11 @@ static void* thr_sched(void* arg)
             wfbx_stats_header_t hdr;
             uint64_t ts_us = mono_us_raw();
             uint32_t tick = g_stat_tick_id++;
-            const char* host_id = (g_stat_host_id[0] != '\0') ? g_stat_host_id : NULL;
             if (wfbx_stats_header_init(&hdr,
                                        1,
                                        WFBX_MODULE_TX,
                                        g_stat_module_id,
-                                       host_id,
+                                       NULL,
                                        tick,
                                        ts_us,
                                        0,
@@ -1324,19 +1322,6 @@ int main(int argc, char** argv) {
   memset(g_stat_module_id, 0, sizeof(g_stat_module_id));
   strncpy(g_stat_module_id, stat_id ? stat_id : "tx", sizeof(g_stat_module_id) - 1);
   g_stat_module_id[sizeof(g_stat_module_id) - 1] = '\0';
-  memset(g_stat_host_id, 0, sizeof(g_stat_host_id));
-  const char* env_host = getenv("WFBX_STAT_HOST");
-  if (env_host && *env_host) {
-    strncpy(g_stat_host_id, env_host, sizeof(g_stat_host_id) - 1);
-    g_stat_host_id[sizeof(g_stat_host_id) - 1] = '\0';
-  } else {
-    char hostbuf[64];
-    if (gethostname(hostbuf, sizeof(hostbuf)) == 0) {
-      hostbuf[sizeof(hostbuf) - 1] = '\0';
-      strncpy(g_stat_host_id, hostbuf, sizeof(g_stat_host_id) - 1);
-      g_stat_host_id[sizeof(g_stat_host_id) - 1] = '\0';
-    }
-  }
   g_stat_enabled = 0;
   if (stat_port > 0 && stat_port <= 65535) {
     memset(&g_stat_addr, 0, sizeof(g_stat_addr));
@@ -1350,11 +1335,10 @@ int main(int argc, char** argv) {
         perror("[STATS] socket");
       } else {
         g_stat_enabled = 1;
-        fprintf(stderr, "[STATS] TX stats -> %s:%d id=%s host=%s\n",
+        fprintf(stderr, "[STATS] TX stats -> %s:%d id=%s (host will be set by statd)\n",
                 stat_ip,
                 stat_port,
-                g_stat_module_id,
-                (g_stat_host_id[0] != '\0') ? g_stat_host_id : "");
+                g_stat_module_id);
       }
     }
   } else {

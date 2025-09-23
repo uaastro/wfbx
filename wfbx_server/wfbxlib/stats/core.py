@@ -37,7 +37,7 @@ class Header:
     flags: int
     section_count: int
     payload_len: int
-    host_id: str = ""
+    host_id: str = ""  # Producers leave blank; statd populates on ingest if missing
     crc32: int = 0
 
     def pack(self) -> bytes:

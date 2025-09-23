@@ -23,7 +23,7 @@ typedef struct {
     uint8_t  version;
     uint8_t  module_type; /* wfbx_module_type_t */
     char     module_id[24];
-    char     host_id[16];
+    char     host_id[16];  /* Emitters leave this zeroed; statd populates on ingest */
     uint32_t tick_id;
     uint64_t timestamp_us;
     uint16_t flags;
