@@ -35,6 +35,8 @@
 #include <linux/netlink.h>
 #include <linux/genetlink.h>
 #include <linux/nl80211.h>
+#include <linux/wireless.h>
+#include <sys/ioctl.h>
 #include <net/if.h>
 #ifndef NLA_ALIGNTO
 #define NLA_ALIGNTO 4
@@ -124,6 +126,70 @@ static uint32_t nla_get_u32(const struct nlattr* nla)
     return val;
 }
 
+/* Convert 802.11 channel number to center frequency in MHz. */
+static int channel_to_freq_mhz(int channel)
+{
+    if (channel <= 0) return 0;
+    if (channel == 14) return 2484;
+    if (channel < 14) return 2407 + channel * 5;
+    if (channel >= 182 && channel <= 196) return 4000 + channel * 5;
+    return 5000 + channel * 5;
+}
+
+/* Convert iw_freq representation (mantissa/exponent) to MHz. */
+static int iwfreq_to_mhz(const struct iw_freq* wf)
+{
+    if (!wf) return 0;
+    if (wf->m != 0) {
+        double value = (double)wf->m;
+        if (wf->e > 0) {
+            for (int i = 0; i < wf->e; ++i) value *= 10.0;
+        } else if (wf->e < 0) {
+            for (int i = 0; i < -wf->e; ++i) value /= 10.0;
+        }
+        if (value > 0.0) {
+            double mhz = value / 1e6;
+            if (mhz >= 100.0) return (int)(mhz + 0.5);
+            int ch_guess = (int)(value + 0.5);
+            int freq_from_ch = channel_to_freq_mhz(ch_guess);
+            if (freq_from_ch > 0) return freq_from_ch;
+        }
+    }
+    if (wf->i > 0) {
+        int freq_from_idx = channel_to_freq_mhz((int)wf->i);
+        if (freq_from_idx > 0) return freq_from_idx;
+    }
+    if (wf->e == 0 && wf->m > 0) {
+        int freq_from_channel = channel_to_freq_mhz((int)wf->m);
+        if (freq_from_channel > 0) return freq_from_channel;
+    }
+    return 0;
+}
+
+/* Try Wireless Extensions ioctl first, fallback to nl80211 on failure. */
+static int ioctl_get_frequency_mhz(const char* ifname)
+{
+#ifdef SIOCGIWFREQ
+    if (!ifname || !*ifname) return 0;
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return 0;
+    struct iwreq req;
+    memset(&req, 0, sizeof(req));
+    strncpy(req.ifr_name, ifname, IFNAMSIZ);
+    req.ifr_name[IFNAMSIZ - 1] = '\0';
+    if (ioctl(fd, SIOCGIWFREQ, &req) != 0) {
+        close(fd);
+        return 0;
+    }
+    struct iw_freq freq = req.u.freq;
+    close(fd);
+    return iwfreq_to_mhz(&freq);
+#else
+    (void)ifname;
+    return 0;
+#endif
+}
+
 static int nl80211_open_socket(void)
 {
     if (g_nl_sock >= 0) return 0;
@@ -195,6 +261,8 @@ static int nl80211_resolve_family(void)
 static int nl80211_get_frequency(const char* ifname)
 {
     if (!ifname) return 0;
+    int freq_mhz = ioctl_get_frequency_mhz(ifname);
+    if (freq_mhz > 0) return freq_mhz;
     if (nl80211_resolve_family() <= 0) return 0;
     int ifindex = if_nametoindex(ifname);
     if (ifindex == 0) return 0;
@@ -229,7 +297,7 @@ static int nl80211_get_frequency(const char* ifname)
     int len = recv(g_nl_sock, buf, sizeof(buf), 0);
     if (len < 0) return 0;
 
-    int freq_mhz = 0;
+    freq_mhz = 0;
     int wiphy_id = -1;
     for (struct nlmsghdr* hdr = (struct nlmsghdr*)buf; NLMSG_OK(hdr, len); hdr = NLMSG_NEXT(hdr, len)) {
         if (hdr->nlmsg_type == NLMSG_ERROR) {
