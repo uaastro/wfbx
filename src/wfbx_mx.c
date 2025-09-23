@@ -35,9 +35,9 @@
 #include <linux/netlink.h>
 #include <linux/genetlink.h>
 #include <linux/nl80211.h>
+#include <net/if.h>
 #include <linux/wireless.h>
 #include <sys/ioctl.h>
-#include <net/if.h>
 #ifndef NLA_ALIGNTO
 #define NLA_ALIGNTO 4
 #endif
