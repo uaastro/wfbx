@@ -415,22 +415,22 @@ def render_tx(record: ModuleRecord) -> Group:
     if record.tx_epoch is not None:
         te = record.tx_epoch
         labels = [
-            "e_epoch_base_us",
-            "mx_epoch_msgs",
-            "base_adv",
-            "base_step_avg_us",
-            "base_step_samples",
-            "epoch_adj_count",
-            "epoch_adj_avg_us",
+            "e_epoch",
+            "mx_msgs",
+            "step_smp",
+            "adj_count",
+            "adj_avg",
+            "adj_min",
+            "adj_max",
         ]
         values = [
             str(te.e_epoch_base_us),
             str(te.mx_epoch_msgs),
-            str(te.base_adv),
-            str(te.base_step_avg_us),
             str(te.base_step_samples),
             str(te.epoch_adj_count),
             str(te.epoch_adj_avg_us),
+            str(te.epoch_adj_min_us),
+            str(te.epoch_adj_max_us),
         ]
         blocks.append(_two_row_table(labels, values, style_label="blue", style_value="bright_black"))
 
