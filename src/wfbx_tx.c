@@ -892,19 +892,27 @@ static void* thr_sched(void* arg)
               (unsigned long long)slot_max);
       /* Epoch drift vs base + MX counters */
       uint64_t cur_epoch_us = 0, cur_base_us = 0;
+      uint64_t sf_len_us = 0;
       pthread_mutex_lock(&g_epoch.mtx);
       cur_epoch_us = g_epoch.cur_us;
+      sf_len_us = (uint64_t)g_epoch.len_us + (uint64_t)g_epoch.gi_us;
       pthread_mutex_unlock(&g_epoch.mtx);
       pthread_mutex_lock(&g_epoch_base.mtx);
       cur_base_us = g_epoch_base.cur_us;
       pthread_mutex_unlock(&g_epoch_base.mtx);
-      long long e_epoch_base = (long long)((int64_t)cur_epoch_us - (int64_t)cur_base_us);
+      int64_t e_epoch_base = (int64_t)cur_epoch_us - (int64_t)cur_base_us;
+      if (sf_len_us > 0) {
+        int64_t T = (int64_t)sf_len_us;
+        e_epoch_base %= T;
+        if (e_epoch_base > T / 2) e_epoch_base -= T;
+        else if (e_epoch_base < -T / 2) e_epoch_base += T;
+      }
       pthread_mutex_lock(&g_epoch_bias_mtx);
-      if (!g_epoch_bias_set) {
+      if (!g_epoch_bias_set && g_epoch_adj_count_period > 0) {
         g_epoch_bias_us = e_epoch_base;
         g_epoch_bias_set = 1;
       }
-      int64_t epoch_bias = g_epoch_bias_us;
+      int64_t epoch_bias = g_epoch_bias_set ? g_epoch_bias_us : 0;
       pthread_mutex_unlock(&g_epoch_bias_mtx);
       long long e_epoch_base_adj = e_epoch_base - epoch_bias;
       fprintf(stderr, "[TX STAT] e_epoch=%lld us | mx_epoch_msgs=%llu | base_adv=%llu\n",
