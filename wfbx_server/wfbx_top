@@ -488,7 +488,7 @@ def render_tx(record: ModuleRecord) -> Group:
         tq = record.tx_queue
         labels = ["queue avg", "min", "max", "samples", ""]
         values = [str(tq.avg), str(tq.min), str(tq.max), str(tq.samples), ""]
-        metrics_table.add_row(*[Text(lbl, style="green") if lbl else Text("") for lbl in labels])
+        metrics_table.add_row(*[Text(lbl, style="cyan") if lbl else Text("") for lbl in labels])
         metrics_table.add_row(*[Text(val, style="bright_black") if val else Text("") for val in values])
         metrics_added = True
 
@@ -496,7 +496,7 @@ def render_tx(record: ModuleRecord) -> Group:
         tslt = record.tx_slot
         labels = ["slot avg", "min", "max", "slots", ""]
         values = [str(tslt.avg), str(tslt.min), str(tslt.max), str(tslt.slots), ""]
-        metrics_table.add_row(*[Text(lbl, style="yellow") if lbl else Text("") for lbl in labels])
+        metrics_table.add_row(*[Text(lbl, style="cyan") if lbl else Text("") for lbl in labels])
         metrics_table.add_row(*[Text(val, style="bright_black") if val else Text("") for val in values])
         metrics_added = True
 
