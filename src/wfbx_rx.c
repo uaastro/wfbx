@@ -380,6 +380,7 @@ struct cli_cfg {
   int port;
   struct txid_filter txf; /* NEW: flexible filter */
   int link_id;
+  int group_id;
   int radio_port;
   int stat_period_ms;
   const char* stat_ip;
@@ -405,6 +406,7 @@ static void print_help(const char* prog)
     "                      (NOTE: use quotes or escape '!' in bash: --tx_id '!0,7' or --tx_id '\'!0,7)\n" 
     "                      (default: 0 — only tx_id=0)\n"
     "  --link_id <id>      Filter by Link ID (addr3[4]); -1 disables filter (default: 0)\n"
+    "  --group_id <id>     Filter by Group ID (addr1[5]); -1 disables filter (default: any)\n"
     "  --radio_port <id>   Filter by Radio Port (addr3[5]); -1 disables filter (default: 0)\n"
     "  --stat_period <ms>  Stats period in milliseconds (default: %d)\n"
     "  --help              Show this help and exit\n"
@@ -424,6 +426,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
   txf_parse(&cfg->txf, "0");   /* default: only tx_id=0 */
   cfg->tx_filter_spec = "0";
   cfg->link_id = 0;
+  cfg->group_id = -1;
   cfg->radio_port = 0;
   cfg->n_if = 0;
   cfg->stat_period_ms = STATS_PERIOD_MS_DEFAULT;
@@ -439,6 +442,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
     {"stat_id",      required_argument, 0, 0},
     {"tx_id",        required_argument, 0, 0},
     {"link_id",      required_argument, 0, 0},
+    {"group_id",     required_argument, 0, 0},
     {"radio_port",   required_argument, 0, 0},
     {"stat_period",  required_argument, 0, 0},
     {"help",         no_argument,       0, 0},
@@ -459,6 +463,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
       else if (strcmp(name,"stat_id")==0)      cfg->stat_id = val;
       else if (strcmp(name,"tx_id")==0) { cfg->tx_filter_spec = val; txf_parse(&cfg->txf, val); }
       else if (strcmp(name,"link_id")==0)      cfg->link_id = atoi(val);
+      else if (strcmp(name,"group_id")==0)     cfg->group_id = atoi(val);
       else if (strcmp(name,"radio_port")==0)   cfg->radio_port = atoi(val);
       else if (strcmp(name,"stat_period")==0)  cfg->stat_period_ms = atoi(val);
       else if (strcmp(name,"help")==0) { print_help(argv[0]); exit(0); }
@@ -632,10 +637,10 @@ int main(int argc, char** argv)
 
   fprintf(stderr, "RX: ");
   for (int i=0;i<n_open;i++) fprintf(stderr, "%s%s", cli.ifname[i], (i+1<n_open?", ":""));
-  fprintf(stderr, " -> UDP %s:%d | stats %d ms | filters: TX=%s LINK=%d PORT=%d | stats -> %s:%d id=%s\n",
+  fprintf(stderr, " -> UDP %s:%d | stats %d ms | filters: TX=%s LINK=%d GROUP=%d PORT=%d | stats -> %s:%d id=%s\n",
           cli.ip, cli.port, cli.stat_period_ms,
           (cli.txf.mode==TXF_ANY?"any":(cli.txf.mode==TXF_INCLUDE?"include":"exclude")),
-          cli.link_id, cli.radio_port,
+          cli.link_id, cli.group_id, cli.radio_port,
           cli.stat_ip, cli.stat_port, cli.stat_id);
 
   /* Global period accumulators */
@@ -663,8 +668,9 @@ int main(int argc, char** argv)
   /* NEW: last-seen bookkeeping (per tx_id) */
   uint64_t last_seen_ms[MAX_TX_IDS] = {0};      /* 0 => never seen */
   uint8_t  last_link_id[MAX_TX_IDS];            /* 0xFF => unknown */
+  uint8_t  last_group_id[MAX_TX_IDS];           /* 0xFF => unknown */
   uint8_t  last_radio_port[MAX_TX_IDS];         /* 0xFF => unknown */
-  for (int i=0;i<MAX_TX_IDS;i++) { last_link_id[i]=0xFF; last_radio_port[i]=0xFF; }
+  for (int i=0;i<MAX_TX_IDS;i++) { last_link_id[i]=0xFF; last_group_id[i]=0xFF; last_radio_port[i]=0xFF; }
 
 
   /* Per-TX dedup windows (one 12-bit sequence space per tx_id). */
@@ -743,16 +749,19 @@ int main(int argc, char** argv)
         if (extract_dot11(pkt, hdr->caplen, &rs, &v) != 0) continue;
 
         /* filters */
+        uint8_t group_id_rx = v.h->addr1[5];
         uint8_t tx_id      = v.h->addr2[5];
         uint8_t link_id    = v.h->addr3[4];
         uint8_t radio_port = v.h->addr3[5];
         if (!txf_match(&cli.txf, tx_id)) continue;
         if (cli.link_id    >= 0 && link_id    != (uint8_t)cli.link_id)    continue;
+        if (cli.group_id   >= 0 && group_id_rx != (uint8_t)cli.group_id) continue;
         if (cli.radio_port >= 0 && radio_port != (uint8_t)cli.radio_port) continue;
 
         /* Mark last-seen for this tx_id (after filters) */
         last_seen_ms[tx_id]   = now_ms();
         last_link_id[tx_id]   = link_id;
+        last_group_id[tx_id]  = group_id_rx;
         last_radio_port[tx_id]= radio_port;
 
         /* Determine mesh trailer size for trimming (from wfb_defs.h) */
@@ -912,13 +921,14 @@ stats_tick:
           if (last_seen_ms[t] != 0) {
             uint64_t idle_ms = t1 - last_seen_ms[t];
             int ll = (last_link_id[t]   == 0xFF) ? -1 : (int)last_link_id[t];
+            int gp = (last_group_id[t]  == 0xFF) ? -1 : (int)last_group_id[t];
             int rp = (last_radio_port[t]== 0xFF) ? -1 : (int)last_radio_port[t];
             fprintf(stderr,
-              "[TX %03d] dt=%llu ms | signal LOST | idle=%llu ms | link_id=%d | radio_port=%d | rate=0.0 kbps | RSSI = n/a\n",
+              "[TX %03d] dt=%llu ms | signal LOST | idle=%llu ms | link_id=%d | group_id=%d | radio_port=%d | rate=0.0 kbps | RSSI = n/a\n",
               t,
               (unsigned long long)(t1 - t0),
               (unsigned long long)idle_ms,
-              ll, rp);
+              ll, gp, rp);
           }
           continue; /* nothing else to print for this tx_id */
         }
@@ -1124,7 +1134,7 @@ stats_tick:
 
       if (!build_failed) {
         wfbx_rx_filter_info_t filters = {
-          .group_id = 0xFF,
+          .group_id = (cli.group_id >= 0 && cli.group_id <= 255) ? (uint8_t)cli.group_id : 0xFF,
           .txf_mode = (uint8_t)cli.txf.mode,
           .has_link_id = (cli.link_id >= 0) ? 1u : 0u,
           .has_radio_port = (cli.radio_port >= 0) ? 1u : 0u,

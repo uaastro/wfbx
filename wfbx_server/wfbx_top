@@ -300,6 +300,7 @@ def render_summary_table(record: ModuleRecord) -> Table:
             txf_mode = {0: "any", 1: "include", 2: "exclude"}.get(filt.txf_mode, str(filt.txf_mode))
             spec = filt.txf_spec or "-"
             table.add_row("TX filter", f"{txf_mode}: {spec}")
+            table.add_row("Group filter", str(filt.group_id) if filt.group_id != 0xFF else "any")
             if filt.has_link_id:
                 table.add_row("Link filter", str(filt.link_id))
             else:
@@ -536,8 +537,6 @@ def render_rx(record: ModuleRecord) -> Group:
         summary_line.append(f"{summary.iface_count}", style="bright_cyan")
         summary_line.append("  tx ")
         summary_line.append(f"{summary.tx_count}", style="bright_cyan")
-        summary_line.append("  filters ")
-        summary_line.append(f"0x{summary.filter_flags:04X}", style="bright_magenta")
     else:
         summary_line = Text("summary unavailable", style="dim")
     blocks.append(summary_line)
@@ -546,9 +545,11 @@ def render_rx(record: ModuleRecord) -> Group:
         filt = record.rx_filter
         txf_mode = {0: "any", 1: "include", 2: "exclude"}.get(filt.txf_mode, str(filt.txf_mode))
         filter_line = Text("filters: ", style="cyan")
-        filter_line.append(f"tx={txf_mode} {filt.txf_spec or '-'}", style="bright_white")
+        filter_line.append(f"tx={filt.txf_spec or '-'}", style="bright_white")
         filter_line.append("  link=", style="cyan")
         filter_line.append(str(filt.link_id) if filt.has_link_id else "any", style="bright_white")
+        filter_line.append("  group=", style="cyan")
+        filter_line.append(str(filt.group_id) if filt.group_id != 0xFF else "any", style="bright_white")
         filter_line.append("  radio=", style="cyan")
         filter_line.append(str(filt.radio_port) if filt.has_radio_port else "any", style="bright_white")
         blocks.append(filter_line)
@@ -603,14 +604,14 @@ def render_rx(record: ModuleRecord) -> Group:
                     chain_quality = chain.quality_permille / 10.0
                     chain_rssi = chain.rssi_avg_q8 / 256.0
                     chain_rows.append([
-                        Text(str(if_entry.iface_id), style="bright_white"),
-                        Text(freq_text, style="bright_white"),
-                        Text(str(chain.ant_id), style="bright_white"),
-                        Text(str(chain.packets), style="bright_white"),
-                        Text(str(chain.lost), style="bright_white"),
-                        Text(f"{chain_rssi:.1f}", style="bright_white"),
+                        Text(str(if_entry.iface_id), style="bright_black"),
+                        Text(freq_text, style="bright_black"),
+                        Text(str(chain.ant_id), style="bright_black"),
+                        Text(str(chain.packets), style="bright_black"),
+                        Text(str(chain.lost), style="bright_black"),
+                        Text(f"{chain_rssi:.1f}", style="bright_black"),
                         render_signal_bar_text(chain_rssi, glyph="❘"),
-                        Text(f"{chain_quality:.1f}", style="bright_white"),
+                        Text(f"{chain_quality:.1f}", style="bright_black"),
                     ])
 
             if chain_rows:
