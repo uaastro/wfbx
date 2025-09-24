@@ -524,7 +524,6 @@ def render_rx(record: ModuleRecord) -> Group:
     blocks: List = []
     summary = record.rx_summary
     if summary is not None:
-        summary_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
         labels = ["pkts", "rate", "ifaces", "tx"]
         values = [
             f"{summary.packets_total}",
@@ -532,25 +531,24 @@ def render_rx(record: ModuleRecord) -> Group:
             f"{summary.iface_count}",
             f"{summary.tx_count}",
         ]
-        summary_table.add_row(*[Text(label, style="cyan") for label in labels])
-        summary_table.add_row(*values)
-        blocks.append(summary_table)
     else:
-        blocks.append(Text("summary unavailable", style="dim"))
+        labels = ["pkts", "rate", "ifaces", "tx"]
+        values = ["n/a", "n/a", "n/a", "n/a"]
 
     if record.rx_filter is not None:
         filt = record.rx_filter
-        filter_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
-        labels = ["group", "tx", "link", "radio"]
-        values = [
+        labels.extend(["group", "tx", "link", "radio"])
+        values.extend([
             str(filt.group_id) if filt.group_id != 0xFF else "any",
             filt.txf_spec or "-",
             str(filt.link_id) if filt.has_link_id else "any",
             str(filt.radio_port) if filt.has_radio_port else "any",
-        ]
-        filter_table.add_row(*[Text(label, style="cyan") for label in labels])
-        filter_table.add_row(*values)
-        blocks.append(filter_table)
+        ])
+
+    info_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+    info_table.add_row(*[Text(label, style="cyan") for label in labels])
+    info_table.add_row(*values)
+    blocks.append(info_table)
 
     dt_ms = summary.dt_ms if summary and summary.dt_ms > 0 else 1000
 
