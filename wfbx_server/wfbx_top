@@ -524,35 +524,33 @@ def render_rx(record: ModuleRecord) -> Group:
     blocks: List = []
     summary = record.rx_summary
     if summary is not None:
-        summary_line = Text()
-        summary_line.append(Text("pkts ", style="cyan"))
-        summary_line.append(Text(f"{summary.packets_total}", style="bright_cyan"))
-        if summary.dt_ms > 0:
-            rate = (summary.bytes_total * 8.0) / summary.dt_ms
-            summary_line.append(Text("  rate ", style="cyan"))
-            summary_line.append(Text(f"{rate:.1f} kbps", style="bright_cyan"))
-        else:
-            summary_line.append("  rate n/a", style="dim")
-        summary_line.append(Text("  ifaces ", style="cyan"))
-        summary_line.append(Text(f"{summary.iface_count}", style="bright_cyan"))
-        summary_line.append(Text("  tx ", style="cyan"))
-        summary_line.append(Text(f"{summary.tx_count}", style="bright_cyan"))
+        summary_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+        labels = ["pkts", "rate", "ifaces", "tx"]
+        values = [
+            f"{summary.packets_total}",
+            f"{((summary.bytes_total * 8.0) / summary.dt_ms):.1f} kbps" if summary.dt_ms > 0 else "n/a",
+            f"{summary.iface_count}",
+            f"{summary.tx_count}",
+        ]
+        summary_table.add_row(*[Text(label, style="cyan") for label in labels])
+        summary_table.add_row(*values)
+        blocks.append(summary_table)
     else:
-        summary_line = Text("summary unavailable", style="dim")
-    blocks.append(summary_line)
+        blocks.append(Text("summary unavailable", style="dim"))
 
     if record.rx_filter is not None:
         filt = record.rx_filter
-        txf_mode = {0: "any", 1: "include", 2: "exclude"}.get(filt.txf_mode, str(filt.txf_mode))
-        filter_line = Text("filters: ", style="cyan")
-        filter_line.append(Text("group ", style="cyan"))
-        filter_line.append(Text(str(filt.group_id) if filt.group_id != 0xFF else "any", style="bright_cyan"))
-        filter_line.append(Text(f"  tx {filt.txf_spec or '-'}", style="bright_cyan"))
-        filter_line.append(Text("  link ", style="cyan"))
-        filter_line.append(Text(str(filt.link_id) if filt.has_link_id else "any", style="bright_cyan"))
-        filter_line.append(Text("  radio ", style="cyan"))
-        filter_line.append(Text(str(filt.radio_port) if filt.has_radio_port else "any", style="bright_cyan"))
-        blocks.append(filter_line)
+        filter_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+        labels = ["group", "tx", "link", "radio"]
+        values = [
+            str(filt.group_id) if filt.group_id != 0xFF else "any",
+            filt.txf_spec or "-",
+            str(filt.link_id) if filt.has_link_id else "any",
+            str(filt.radio_port) if filt.has_radio_port else "any",
+        ]
+        filter_table.add_row(*[Text(label, style="cyan") for label in labels])
+        filter_table.add_row(*values)
+        blocks.append(filter_table)
 
     dt_ms = summary.dt_ms if summary and summary.dt_ms > 0 else 1000
 
