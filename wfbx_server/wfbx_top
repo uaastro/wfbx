@@ -526,8 +526,12 @@ def render_rx(record: ModuleRecord) -> Group:
         summary_line = Text()
         summary_line.append("pkts ")
         summary_line.append(f"{summary.packets_total}", style="bright_cyan")
-        summary_line.append("  bytes ")
-        summary_line.append(f"{summary.bytes_total}", style="bright_cyan")
+        if summary.dt_ms > 0:
+            rate = (summary.bytes_total * 8.0) / summary.dt_ms
+            summary_line.append("  rate ")
+            summary_line.append(f"{rate:.1f} kbps", style="bright_cyan")
+        else:
+            summary_line.append("  rate n/a", style="dim")
         summary_line.append("  ifaces ")
         summary_line.append(f"{summary.iface_count}", style="bright_cyan")
         summary_line.append("  tx ")
