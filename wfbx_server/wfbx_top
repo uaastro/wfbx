@@ -276,14 +276,22 @@ def render_summary_table(record: ModuleRecord) -> Table:
         summary = record.summary
         table.add_row("Window ms", str(summary.dt_ms))
         table.add_row("Packets", str(summary.packets_total))
-        table.add_row("Bytes", str(summary.bytes_total))
+        if summary.dt_ms > 0:
+            rate = (summary.bytes_total * 8.0) / summary.dt_ms
+            table.add_row("Rate kbps", f"{rate:.1f}")
+        else:
+            table.add_row("Rate kbps", "-")
         table.add_row("Interfaces", str(summary.iface_count))
         table.add_row("TX count", str(summary.tx_count))
     elif record.rx_summary is not None:
         summary = record.rx_summary
         table.add_row("Window ms", str(summary.dt_ms))
         table.add_row("Packets", str(summary.packets_total))
-        table.add_row("Bytes", str(summary.bytes_total))
+        if summary.dt_ms > 0:
+            rate = (summary.bytes_total * 8.0) / summary.dt_ms
+            table.add_row("Rate kbps", f"{rate:.1f}")
+        else:
+            table.add_row("Rate kbps", "-")
         table.add_row("Interfaces", str(summary.iface_count))
         table.add_row("TX count", str(summary.tx_count))
         table.add_row("Filter flags", f"0x{summary.filter_flags:04X}")
@@ -587,30 +595,18 @@ def render_rx(record: ModuleRecord) -> Group:
                 if if_entry.tx_id != entry.tx_id:
                     continue
                 freq_text = f"{if_entry.freq_mhz}" if if_entry.freq_mhz else "-"
-                iface_quality = if_entry.quality_permille / 10.0
-                iface_rssi = if_entry.best_chain_rssi_q8 / 256.0
-                chain_rows.append([
-                    Text(str(if_entry.iface_id), style="bright_white"),
-                    Text(freq_text, style="bright_white"),
-                    Text("-", style="bright_black"),
-                    Text(str(if_entry.packets), style="bright_white"),
-                    Text(str(if_entry.lost), style="bright_white"),
-                    Text(f"{iface_rssi:.1f}", style="bright_white"),
-                    render_signal_bar_text(iface_rssi, glyph="❚"),
-                    Text(f"{iface_quality:.1f}", style="bright_white"),
-                ])
                 for chain in if_entry.chains:
                     chain_quality = chain.quality_permille / 10.0
                     chain_rssi = chain.rssi_avg_q8 / 256.0
                     chain_rows.append([
-                        Text(str(if_entry.iface_id), style="bright_black"),
-                        Text(freq_text, style="bright_black"),
-                        Text(str(chain.ant_id), style="bright_black"),
-                        Text(str(chain.packets), style="bright_black"),
-                        Text(str(chain.lost), style="bright_black"),
-                        Text(f"{chain_rssi:.1f}", style="bright_black"),
+                        Text(str(if_entry.iface_id), style="bright_white"),
+                        Text(freq_text, style="bright_white"),
+                        Text(str(chain.ant_id), style="bright_white"),
+                        Text(str(chain.packets), style="bright_white"),
+                        Text(str(chain.lost), style="bright_white"),
+                        Text(f"{chain_rssi:.1f}", style="bright_white"),
                         render_signal_bar_text(chain_rssi, glyph="❘"),
-                        Text(f"{chain_quality:.1f}", style="bright_black"),
+                        Text(f"{chain_quality:.1f}", style="bright_white"),
                     ])
 
             if chain_rows:
