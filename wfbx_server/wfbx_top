@@ -524,20 +524,20 @@ def render_rx(record: ModuleRecord) -> Group:
     blocks: List = []
     summary = record.rx_summary
     if summary is not None:
-        labels = ["pkts", "rate", "ifaces", "tx"]
+        labels = ["pkts", "rate(kbps)", "ifaces", "tx"]
         values = [
             f"{summary.packets_total}",
-            f"{((summary.bytes_total * 8.0) / summary.dt_ms):.1f} kbps" if summary.dt_ms > 0 else "n/a",
+            f"{((summary.bytes_total * 8.0) / summary.dt_ms):.1f}" if summary.dt_ms > 0 else "n/a",
             f"{summary.iface_count}",
             f"{summary.tx_count}",
         ]
     else:
-        labels = ["pkts", "rate", "ifaces", "tx"]
+        labels = ["pkts", "rate(kbps)", "ifaces", "tx"]
         values = ["n/a", "n/a", "n/a", "n/a"]
 
     if record.rx_filter is not None:
         filt = record.rx_filter
-        labels.extend(["group", "tx", "link", "radio"])
+        labels.extend(["group_id", "tx_id", "link_id", "radio_port"])
         values.extend([
             str(filt.group_id) if filt.group_id != 0xFF else "any",
             filt.txf_spec or "-",
