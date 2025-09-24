@@ -214,6 +214,7 @@ def build_record(datagram: bytes, now: float) -> ModuleRecord:
         tx_entries,
         if_entries,
         global_debug,
+        mx_filter,
         tx_summary,
         tx_queue,
         tx_slot,
