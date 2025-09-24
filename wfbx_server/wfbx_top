@@ -327,36 +327,28 @@ def render_summary_table(record: ModuleRecord) -> Table:
 def render_mx(record: ModuleRecord) -> Group:
     blocks: List = []
     summary = record.summary
-    if summary is not None:
-        summary_line = Text()
-        summary_line.append("pkts ")
-        summary_line.append(f"{summary.packets_total}", style="bright_cyan")
-        summary_line.append("  ctrl_epoch ")
-        summary_line.append(f"{summary.ctrl_epoch_sent}", style="bright_cyan")
-        summary_line.append("  tx ")
-        summary_line.append(f"{summary.tx_count}", style="bright_cyan")
-        summary_line.append("  ifaces ")
-        summary_line.append(f"{summary.iface_count}", style="bright_cyan")
-    else:
-        summary_line = Text("summary unavailable", style="dim")
-    blocks.append(summary_line)
+    headers = ["pkts", "ctrl_epoch", "tx", "ifaces", "group_id", "tx_id"]
+    info_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+    info_table.add_row(*[Text(label, style="cyan") for label in headers])
+
+    pkts_val = f"{summary.packets_total}" if summary is not None else "n/a"
+    ctrl_epoch_val = f"{summary.ctrl_epoch_sent}" if summary is not None else "n/a"
+    tx_val = f"{summary.tx_count}" if summary is not None else "n/a"
+    ifaces_val = f"{summary.iface_count}" if summary is not None else "n/a"
 
     if record.mx_filter is not None:
         filt = record.mx_filter
-        filter_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
-        mode_txt = {0: "any", 1: "include", 2: "exclude"}.get(filt.tx_filter_mode, str(filt.tx_filter_mode))
-        spec_txt = filt.tx_filter_spec or "any"
-        group_txt = "any" if filt.group_id < 0 else str(filt.group_id)
-        filter_table.add_row(Text("tx filter", style="cyan"), Text(f"{mode_txt}: {spec_txt}", style="bright_white"))
-        filter_table.add_row(Text("group", style="cyan"), Text(group_txt, style="bright_white"))
-        filter_table.add_row(Text("ver", style="cyan"), Text(str(filt.version), style="bright_black"))
-        blocks.append(filter_table)
+        group_val = "any" if filt.group_id < 0 else str(filt.group_id)
+        tx_spec = filt.tx_filter_spec or "any"
+    else:
+        group_val = "any"
+        tx_spec = "any"
+
+    info_table.add_row(pkts_val, ctrl_epoch_val, tx_val, ifaces_val, group_val, tx_spec)
+    blocks.append(info_table)
 
     if record.tx_entries:
         dt_ms = summary.dt_ms if summary and summary.dt_ms > 0 else 1000
-        width = console.size.width if console.size.width else 40
-        width = max(10, width - 4)
-        blocks.append(Text("·" * width, style="magenta"))
         for entry in record.tx_entries:
             tx_table = Table(
                 show_header=True,
