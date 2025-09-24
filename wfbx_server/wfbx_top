@@ -36,6 +36,7 @@ class ModuleRecord:
     tx_entries: List[stats_mx.TxSummary]
     if_entries: List[stats_mx.IfDetail]
     global_debug: Optional[stats_mx.GlobalDebug]
+    mx_filter: Optional[stats_mx.FilterInfo]
     tx_summary: Optional[stats_tx.Summary]
     tx_queue: Optional[stats_tx.QueueStats]
     tx_slot: Optional[stats_tx.SlotStats]
@@ -76,6 +77,7 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
     tx_entries: List[stats_mx.TxSummary] = []
     if_entries: List[stats_mx.IfDetail] = []
     global_debug: Optional[stats_mx.GlobalDebug] = None
+    mx_filter: Optional[stats_mx.FilterInfo] = None
     tx_summary: Optional[stats_tx.Summary] = None
     tx_queue: Optional[stats_tx.QueueStats] = None
     tx_slot: Optional[stats_tx.SlotStats] = None
@@ -113,6 +115,11 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
                     global_debug = stats_mx.GlobalDebug.unpack(payload)
                 except ValueError:
                     global_debug = None
+            elif mx_type == stats_mx.SectionType.FILTER_INFO:
+                try:
+                    mx_filter = stats_mx.FilterInfo.unpack(payload)
+                except ValueError:
+                    mx_filter = None
         elif header.module_type == stats_core.ModuleType.RX:
             try:
                 rx_type = stats_rx.SectionType(section_type)
@@ -170,6 +177,7 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
         tx_entries,
         if_entries,
         global_debug,
+        mx_filter,
         tx_summary,
         tx_queue,
         tx_slot,
@@ -228,6 +236,7 @@ def build_record(datagram: bytes, now: float) -> ModuleRecord:
         tx_entries=tx_entries,
         if_entries=if_entries,
         global_debug=global_debug,
+        mx_filter=mx_filter,
         tx_summary=tx_summary,
         tx_queue=tx_queue,
         tx_slot=tx_slot,
@@ -330,6 +339,17 @@ def render_mx(record: ModuleRecord) -> Group:
     else:
         summary_line = Text("summary unavailable", style="dim")
     blocks.append(summary_line)
+
+    if record.mx_filter is not None:
+        filt = record.mx_filter
+        filter_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+        mode_txt = {0: "any", 1: "include", 2: "exclude"}.get(filt.tx_filter_mode, str(filt.tx_filter_mode))
+        spec_txt = filt.tx_filter_spec or "any"
+        group_txt = "any" if filt.group_id < 0 else str(filt.group_id)
+        filter_table.add_row(Text("tx filter", style="cyan"), Text(f"{mode_txt}: {spec_txt}", style="bright_white"))
+        filter_table.add_row(Text("group", style="cyan"), Text(group_txt, style="bright_white"))
+        filter_table.add_row(Text("ver", style="cyan"), Text(str(filt.version), style="bright_black"))
+        blocks.append(filter_table)
 
     if record.tx_entries:
         dt_ms = summary.dt_ms if summary and summary.dt_ms > 0 else 1000

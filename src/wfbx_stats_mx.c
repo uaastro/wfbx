@@ -27,6 +27,14 @@ static void store_i32(uint8_t* dst, int32_t v)
     memcpy(dst, &be, sizeof(be));
 }
 
+static size_t bounded_strnlen(const char* s, size_t max_len)
+{
+    size_t len = 0;
+    if (!s) return 0;
+    while (len < max_len && s[len] != '\0') ++len;
+    return len;
+}
+
 int wfbx_mx_summary_pack(uint8_t* dst, size_t dst_len, const wfbx_mx_summary_t* summary)
 {
     if (!dst || !summary || dst_len < sizeof(wfbx_mx_summary_t)) return -1;
@@ -114,4 +122,20 @@ int wfbx_mx_global_debug_pack(uint8_t* dst, size_t dst_len, const wfbx_mx_global
     store_i32(dst + 56, src->e_epoch_last_max_q4);
     store_u32(dst + 60, src->e_epoch_last_samples);
     return (int)sizeof(wfbx_mx_global_debug_t);
+}
+
+int wfbx_mx_filter_info_pack(uint8_t* dst, size_t dst_len, const wfbx_mx_filter_info_t* src)
+{
+    if (!dst || !src) return -1;
+    size_t spec_cap = sizeof(src->tx_filter_spec);
+    size_t spec_len = bounded_strnlen(src->tx_filter_spec, spec_cap);
+    if (spec_len > 255) spec_len = 255;
+    size_t needed = 5u + spec_len;
+    if (dst_len < needed) return -1;
+    dst[0] = src->version;
+    dst[1] = src->tx_filter_mode;
+    store_i16(dst + 2, src->group_id);
+    dst[4] = (uint8_t)spec_len;
+    if (spec_len > 0) memcpy(dst + 5, src->tx_filter_spec, spec_len);
+    return (int)needed;
 }

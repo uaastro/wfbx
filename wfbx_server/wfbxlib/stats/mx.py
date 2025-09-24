@@ -13,6 +13,7 @@ from . import core
 class SectionType(enum.IntEnum):
     TX_SUMMARY = 0x0002
     GLOBAL_DEBUG = 0x0003
+    FILTER_INFO = 0x0004
     IF_DETAIL = 0x0010
     ANT_DETAIL = 0x0020
 
@@ -199,6 +200,34 @@ class GlobalDebug:
         return cls(*GLOBAL_DEBUG_STRUCT.unpack(data))
 
 
+FILTER_INFO_HEADER = struct.Struct(">BBhB")
+
+
+@dataclasses.dataclass
+class FilterInfo:
+    version: int
+    tx_filter_mode: int
+    group_id: int
+    tx_filter_spec: str
+
+    @classmethod
+    def unpack(cls, data: bytes) -> "FilterInfo":
+        if len(data) < FILTER_INFO_HEADER.size:
+            raise ValueError("filter info header truncated")
+        version, mode, group_id, spec_len = FILTER_INFO_HEADER.unpack(data[: FILTER_INFO_HEADER.size])
+        end = FILTER_INFO_HEADER.size + spec_len
+        if end > len(data):
+            raise ValueError("filter info spec truncated")
+        spec_bytes = data[FILTER_INFO_HEADER.size : end]
+        spec = spec_bytes.decode("utf-8", "ignore") if spec_bytes else ""
+        return cls(
+            version=version,
+            tx_filter_mode=mode,
+            group_id=group_id,
+            tx_filter_spec=spec,
+        )
+
+
 def pack_tx_summary_section(entries: Sequence[TxSummary]) -> bytes:
     return b"".join(entry.pack() for entry in entries)
 
@@ -234,6 +263,7 @@ __all__ = [
     "ChainDetail",
     "IfDetail",
     "GlobalDebug",
+    "FilterInfo",
     "pack_tx_summary_section",
     "unpack_tx_summary_section",
     "pack_if_detail_section",

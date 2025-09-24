@@ -10,6 +10,7 @@ extern "C" {
 enum {
     WFBX_MX_SECTION_TX_SUMMARY   = 0x0002,
     WFBX_MX_SECTION_GLOBAL_DEBUG = 0x0003,
+    WFBX_MX_SECTION_FILTER_INFO  = 0x0004,
     WFBX_MX_SECTION_IF_DETAIL    = 0x0010,
     WFBX_MX_SECTION_ANT_DETAIL   = 0x0020
 };
@@ -76,6 +77,13 @@ typedef struct {
 } wfbx_mx_global_debug_t;
 
 typedef struct {
+    uint8_t version;
+    uint8_t tx_filter_mode;
+    int16_t group_id;
+    char    tx_filter_spec[64];
+} wfbx_mx_filter_info_t;
+
+typedef struct {
     uint32_t dt_ms;
     uint32_t packets_total;
     uint32_t bytes_total;
@@ -89,6 +97,7 @@ typedef struct {
 int wfbx_mx_tx_summary_pack(uint8_t* dst, size_t dst_len, const wfbx_mx_tx_summary_t* src);
 int wfbx_mx_if_detail_pack(uint8_t* dst, size_t dst_len, const wfbx_mx_if_detail_t* hdr, const wfbx_mx_chain_detail_t* chains);
 int wfbx_mx_global_debug_pack(uint8_t* dst, size_t dst_len, const wfbx_mx_global_debug_t* src);
+int wfbx_mx_filter_info_pack(uint8_t* dst, size_t dst_len, const wfbx_mx_filter_info_t* src);
 int wfbx_mx_summary_pack(uint8_t* dst, size_t dst_len, const wfbx_mx_summary_t* summary);
 
 

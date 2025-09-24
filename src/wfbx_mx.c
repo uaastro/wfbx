@@ -560,7 +560,7 @@ static volatile int g_run = 1; static void on_sigint(int){ g_run = 0; }
 
 struct cli_cfg {
   int n_if; const char* ifname[MAX_IFS];
-  const char* ip; int port; struct txid_filter txf; int stat_period_ms;
+  const char* ip; int port; struct txid_filter txf; const char* tx_filter_spec; int group_id; int stat_period_ms;
   /* Mesh time sync params */
   int    tau_us;   /* propagation (us) */
   int    delta_us; /* stack latency (us) */
@@ -585,6 +585,7 @@ static void print_help(const char* prog)
          "  --stat_port <num>   Stats server port (default: 9601)\n"
          "  --stat_id <name>    Stats module identifier (default: mx)\n"
          "  --tx_id <list>      Filter by TX IDs: 'any' | '1,2,10-12' | '!3,7' (default: any)\n"
+         "  --group_id <id>     Filter by Group ID (addr1[5]); -1 disables (default: any)\n"
          "  --delta_us <num>    Stack latency in us (default: 700)\n"
          "  --ctrl <@name>      Control UDS abstract address (default: @wfbx.mx)\n"
          "  --d_max <km>        Max distance in km (sets tau_us = round(d_max*3.335641))\n"
@@ -596,7 +597,7 @@ static void print_help(const char* prog)
 
 static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
 {
-  cfg->ip = g_dest_ip_default; cfg->port = g_dest_port_default; cfg->n_if = 0; cfg->stat_period_ms = 1000; cfg->txf.mode = TXF_ANY;
+  cfg->ip = g_dest_ip_default; cfg->port = g_dest_port_default; cfg->n_if = 0; cfg->stat_period_ms = 1000; cfg->txf.mode = TXF_ANY; cfg->tx_filter_spec = "any"; cfg->group_id = -1;
   cfg->stat_ip = "127.0.0.1"; cfg->stat_port = 9601; cfg->stat_id = NULL;
   cfg->tau_us = 0; cfg->delta_us = 700; cfg->ctrl_addr = "@wfbx.mx"; cfg->epoch_len_us = 0; cfg->epoch_gi_us = 0; cfg->d_max_km = 0.0;
   cfg->debug_stats = 0;
@@ -604,6 +605,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
     {"ip",           required_argument, 0, 0},
     {"port",         required_argument, 0, 0},
     {"tx_id",        required_argument, 0, 0},
+    {"group_id",     required_argument, 0, 0},
     {"stat_ip",     required_argument, 0, 0},
     {"stat_port",   required_argument, 0, 0},
     {"stat_id",     required_argument, 0, 0},
@@ -620,7 +622,8 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
       const char* name = longopts[optidx].name; const char* val = optarg?optarg:"";
       if      (strcmp(name,"ip")==0)          cfg->ip = val;
       else if (strcmp(name,"port")==0)        cfg->port = atoi(val);
-      else if (strcmp(name,"tx_id")==0)       txf_parse(&cfg->txf, val);
+      else if (strcmp(name,"tx_id")==0)       { cfg->tx_filter_spec = val; txf_parse(&cfg->txf, val); }
+      else if (strcmp(name,"group_id")==0)    cfg->group_id = atoi(val);
       else if (strcmp(name,"stat_ip")==0)     cfg->stat_ip = val;
       else if (strcmp(name,"stat_port")==0)   cfg->stat_port = atoi(val);
       else if (strcmp(name,"stat_id")==0)     cfg->stat_id = val;
@@ -688,8 +691,14 @@ int main(int argc, char** argv)
   if (n_open == 0) { fprintf(stderr, "No usable interfaces opened.\n"); return 1; }
 
   fprintf(stderr, "MX RX on: "); for (int i=0;i<n_open;i++) fprintf(stderr, "%s%s", cli.ifname[i], (i+1<n_open?", ":""));
-  fprintf(stderr, " | UDP %s:%d | stat %d ms | delta_us=%d tau_us=%d | ctrl=%s | stats -> %s:%d\n",
-          cli.ip, cli.port, cli.stat_period_ms, cli.delta_us, cli.tau_us,
+  const char* group_txt = "any";
+  char group_buf[8];
+  if (cli.group_id >= 0 && cli.group_id <= 255) {
+    snprintf(group_buf, sizeof(group_buf), "%d", cli.group_id);
+    group_txt = group_buf;
+  }
+  fprintf(stderr, " | UDP %s:%d | stat %d ms | group=%s | delta_us=%d tau_us=%d | ctrl=%s | stats -> %s:%d\n",
+          cli.ip, cli.port, cli.stat_period_ms, group_txt, cli.delta_us, cli.tau_us,
           cli.ctrl_addr, cli.stat_ip, cli.stat_port);
   fprintf(stderr, "Debug epoch stats: %s\n", cli.debug_stats ? "on" : "off");
   if (cli.stat_id && *cli.stat_id) {
@@ -781,7 +790,9 @@ int main(int argc, char** argv)
         struct wfb_pkt_view v; if (extract_dot11(pkt, hdr->caplen, &rs, &v) != 0) continue;
         /* TX-ID filter: use addr2[5] */
         uint8_t tx_id = v.h ? v.h->addr2[5] : 0;
+        uint8_t group_id = v.h ? v.h->addr1[5] : 0;
         if (!txf_match(&cli.txf, tx_id)) continue;
+        if (cli.group_id >= 0 && group_id != (uint8_t)cli.group_id) continue;
 
         /* Timestamps from driver-provided trailer: epoch_tx, ts_tx, ts_rx */
         uint32_t TS_tx_us = 0; int have_ts_tx = 0;
@@ -1282,6 +1293,28 @@ stats_tick:
         } else {
           fprintf(stderr, "[STATS] summary appended size=%d payload_off=%zu\n", summary_sz, payload_off);
           section_count++;
+        }
+
+        if (!build_failed) {
+          const char* tx_spec = (cli.tx_filter_spec && *cli.tx_filter_spec) ? cli.tx_filter_spec : "any";
+          wfbx_mx_filter_info_t filter_info = {
+            .version = 1,
+            .tx_filter_mode = (uint8_t)cli.txf.mode,
+            .group_id = (int16_t)cli.group_id
+          };
+          snprintf(filter_info.tx_filter_spec, sizeof(filter_info.tx_filter_spec), "%s", tx_spec);
+          uint8_t filter_buf[5 + sizeof(filter_info.tx_filter_spec)];
+          int filter_sz = wfbx_mx_filter_info_pack(filter_buf, sizeof(filter_buf), &filter_info);
+          if (filter_sz <= 0 ||
+              append_section(payload, &payload_off, sizeof(payload), WFBX_MX_SECTION_FILTER_INFO, filter_buf, (uint16_t)filter_sz) != 0) {
+            fprintf(stderr, "[STATS] filter info append failed (size=%d)\n", filter_sz);
+            build_failed = 1;
+          } else {
+            fprintf(stderr, "[STATS] filter info appended mode=%u group=%d spec=\"%s\" payload_off=%zu\n",
+                    (unsigned)filter_info.tx_filter_mode, (int)filter_info.group_id,
+                    filter_info.tx_filter_spec, payload_off);
+            section_count++;
+          }
         }
 
         uint8_t* tx_payload = NULL;
