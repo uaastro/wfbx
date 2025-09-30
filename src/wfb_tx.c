@@ -225,11 +225,17 @@ int main(int argc, char** argv) {
   /* open pcap on iface (monitor mode expected) */
   char errbuf[PCAP_ERRBUF_SIZE] = {0};
   pcap_t* ph = pcap_create(iface, errbuf);
-  if (!ph) { fprintf(stderr, "pcap_create(%s): %s\n", iface, errbuf); return 1; }
+  if (!ph) {
+    fprintf(stderr, "pcap_create(%s): %s\n", iface, errbuf);
+    close(us);
+    return 0;
+  }
   (void)pcap_set_immediate_mode(ph, 1);
   if (pcap_activate(ph) != 0) {
     fprintf(stderr, "pcap_activate(%s): %s\n", iface, pcap_geterr(ph));
-    return 1;
+    pcap_close(ph);
+    close(us);
+    return 0;
   }
 
   signal(SIGINT, on_sigint);
@@ -251,7 +257,8 @@ int main(int argc, char** argv) {
                           (uint8_t)mcs_idx, gi_short, bw40, ldpc, stbc,
                           (uint8_t)group_id, (uint8_t)tx_id, (uint8_t)link_id, (uint8_t)radio_port);
     if (ret < 0) {
-      fprintf(stderr, "send_packet failed\n");
+      const char* perr = pcap_geterr(ph);
+      fprintf(stderr, "pcap_inject(%s) failed: %s\n", iface, perr ? perr : "unknown error");
       break;
     }
     seq = (uint16_t)((seq + 1) & 0x0fff);

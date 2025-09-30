@@ -713,7 +713,8 @@ int main(int argc, char** argv)
     }
   }
 
-  while (g_run) {
+  int fatal_iface_error = 0;
+  while (g_run && !fatal_iface_error) {
     uint64_t now = now_ms();
     uint64_t ms_left = (t0 + (uint64_t)cli.stat_period_ms > now) ? (t0 + (uint64_t)cli.stat_period_ms - now) : 0;
     struct timeval tv;
@@ -731,15 +732,23 @@ int main(int argc, char** argv)
       break;
     }
 
-    for (int i=0;i<n_open;i++) {
+    for (int i=0;i<n_open && g_run;i++) {
       if (fds[i] < 0) continue;
       if (sel == 0 || !FD_ISSET(fds[i], &rfds)) continue;
 
-      while (1) {
+      while (g_run) {
         struct pcap_pkthdr* hdr = NULL;
         const u_char* pkt = NULL;
         int rc = pcap_next_ex(ph[i], &hdr, &pkt);
-        if (rc <= 0) break;
+        if (rc == 0) break;
+        if (rc == PCAP_ERROR || rc == PCAP_ERROR_BREAK || rc == -2) {
+          const char* perr = pcap_geterr(ph[i]);
+          fprintf(stderr, "[FATAL] pcap_next_ex(%s) failed (rc=%d): %s\n",
+                  cli.ifname[i], rc, perr ? perr : "unknown error");
+          fatal_iface_error = 1;
+          g_run = 0;
+          break;
+        }
         /* RX host timestamp no longer needed; driver provides ts_rx in trailer */
 
         struct rt_stats rs;
@@ -879,9 +888,12 @@ int main(int argc, char** argv)
           S->ant_id = rs.antenna[c];
         }
       } /* drain */
+      if (fatal_iface_error || !g_run) break;
     } /* each iface */
+    if (fatal_iface_error || !g_run) break;
 
 stats_tick:
+    if (!g_run || fatal_iface_error) break;
     uint64_t t1 = now_ms();
     if (t1 - t0 >= (uint64_t)cli.stat_period_ms) {
       

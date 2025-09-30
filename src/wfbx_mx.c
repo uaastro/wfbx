@@ -747,7 +747,8 @@ int main(int argc, char** argv)
   for (int i=0;i<64;i++){ memset(&subs[i],0,sizeof(subs[i])); subs[i].sa.sun_family=AF_UNIX; }
   uint32_t epoch_seq = 0;
 
-  while (g_run) {
+  int fatal_iface_error = 0;
+  while (g_run && !fatal_iface_error) {
     fd_set rfds; FD_ZERO(&rfds); int maxfd=-1; for (int i=0;i<n_open;i++){ FD_SET(fds[i], &rfds); if (fds[i]>maxfd) maxfd=fds[i]; }
     if (cs >= 0) { FD_SET(cs, &rfds); if (cs > maxfd) maxfd = cs; }
     struct timeval tv; uint64_t now = now_ms(); uint64_t ms_left = (t0 + (uint64_t)cli.stat_period_ms > now) ? (t0 + (uint64_t)cli.stat_period_ms - now) : 0;
@@ -781,13 +782,26 @@ int main(int argc, char** argv)
       }
     }
 
-    for (int i=0;i<n_open;i++) {
+    for (int i=0;i<n_open && g_run;i++) {
       if (fds[i] < 0) continue;
       if (sel == 0 || !FD_ISSET(fds[i], &rfds)) continue;
-      while (1) {
-        struct pcap_pkthdr* hdr = NULL; const u_char* pkt = NULL; int rc = pcap_next_ex(ph[i], &hdr, &pkt); if (rc <= 0) break;
-        struct rt_stats rs; if (parse_radiotap_rx(pkt, hdr->caplen, &rs) != 0) continue;
-        struct wfb_pkt_view v; if (extract_dot11(pkt, hdr->caplen, &rs, &v) != 0) continue;
+      while (g_run) {
+        struct pcap_pkthdr* hdr = NULL;
+        const u_char* pkt = NULL;
+        int rc = pcap_next_ex(ph[i], &hdr, &pkt);
+        if (rc == 0) break;
+        if (rc == PCAP_ERROR || rc == PCAP_ERROR_BREAK || rc == -2) {
+          const char* perr = pcap_geterr(ph[i]);
+          fprintf(stderr, "[FATAL] pcap_next_ex(%s) failed (rc=%d): %s\n",
+                  cli.ifname[i], rc, perr ? perr : "unknown error");
+          fatal_iface_error = 1;
+          g_run = 0;
+          break;
+        }
+        struct rt_stats rs;
+        if (parse_radiotap_rx(pkt, hdr->caplen, &rs) != 0) continue;
+        struct wfb_pkt_view v;
+        if (extract_dot11(pkt, hdr->caplen, &rs, &v) != 0) continue;
         /* TX-ID filter: use addr2[5] */
         uint8_t tx_id = v.h ? v.h->addr2[5] : 0;
         uint8_t group_id = v.h ? v.h->addr1[5] : 0;
@@ -1033,10 +1047,13 @@ int main(int argc, char** argv)
         bytes_forwarded += fwd_len;
         (void)sendto(us, v.payload, fwd_len, 0, (struct sockaddr*)&dst, sizeof(dst));
         pkts++;
+        if (fatal_iface_error || !g_run) break;
       }
+      if (fatal_iface_error || !g_run) break;
     }
 
 stats_tick:
+    if (!g_run || fatal_iface_error) break;
     {
       uint64_t t1 = now_ms(); if (t1 - t0 >= (uint64_t)cli.stat_period_ms) {
         double avg_real_du = 0.0;

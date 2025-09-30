@@ -558,6 +558,8 @@ int main(int argc, char** argv)
           bytes_period   += v.payload_len;
         }
 
+        if (fatal_iface_error || !g_run) break;
+
         /* per-antenna per-interface stats */
         for (int c=0;c<rs.chains && c<RX_ANT_MAX; ++c) {
           if (rs.rssi[c] == SCHAR_MIN) continue;
@@ -580,9 +582,12 @@ int main(int argc, char** argv)
           S->ant_id = rs.antenna[c];
         }
       } /* drain */
+      if (fatal_iface_error || !g_run) break;
     } /* each iface */
+    if (fatal_iface_error || !g_run) break;
 
 stats_tick:
+    if (!g_run || fatal_iface_error) break;
     uint64_t t1 = now_ms();
     if (t1 - t0 >= (uint64_t)cli.stat_period_ms) {
       double seconds = (double)(t1 - t0) / 1000.0;

@@ -76,6 +76,7 @@ static uint8_t        g_stat_packet[WFBX_TX_STATS_MAX_PACKET];
 static size_t         g_stat_packet_len = 0;
 static uint32_t       g_stat_tick_id = 0;
 static char           g_stat_module_id[24] = "tx";
+static char           g_iface_name[64] = {0};
 
 static int stats_append_section(uint8_t* dst, size_t* offset, size_t cap,
                                 uint16_t type, const uint8_t* data, uint16_t length);
@@ -1187,6 +1188,13 @@ static void* thr_sched(void* arg)
       pthread_mutex_unlock(&g_stat_mtx);
       /* delta_us/tau_max_us are already reflected in guards and T_close; pace by airtime only */
       t_next_send = now + (uint64_t)A_us + (uint64_t)g_send_guard_us;
+    } else {
+      const char* perr = g_ph ? pcap_geterr(g_ph) : NULL;
+      const char* ifname = g_iface_name[0] ? g_iface_name : "iface";
+      fprintf(stderr, "[FATAL] pcap_inject(%s) failed: %s\n",
+              ifname, perr ? perr : "unknown error");
+      g_run = 0;
+      break;
     }
   }
   return NULL;
@@ -1339,6 +1347,7 @@ int main(int argc, char** argv) {
     return 1;
   }
   const char* iface = argv[optind];
+  snprintf(g_iface_name, sizeof(g_iface_name), "%s", iface);
 
   /* Prepare stats module metadata */
   memset(g_stat_module_id, 0, sizeof(g_stat_module_id));
