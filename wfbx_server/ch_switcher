@@ -1,0 +1,132 @@
+#!/usr/bin/python3
+import click
+import socket
+import signal
+import threading
+from commentedconfigparser import CommentedConfigParser
+
+
+def rx(stop_event, wfb_cfg, sock, ch_id, mpkts, wlan):
+    config = CommentedConfigParser()
+    while not stop_event.is_set():
+        try:
+            data, _ = sock.recvfrom(mpkts)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+
+        try:
+            line = data.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            continue
+
+        parts = line.split(':')
+        if len(parts) < 2 or parts[0] != str(ch_id):
+            continue
+
+        config.read(wfb_cfg)
+        if wlan not in config or 'channel' not in config[wlan]:
+            print(f"missing '{wlan}' section or 'channel' key in {wfb_cfg}")
+            stop_event.set()
+            break
+
+        current_channel = config[wlan]['channel']
+        requested_channel = parts[1]
+        if requested_channel in (current_channel, 'def'):
+            continue
+
+        config[wlan]['channel'] = requested_channel
+        print('conf:', config[wlan]['channel'])
+        print(wfb_cfg)
+        with open(wfb_cfg, 'w') as configfile:
+            config.write(configfile)
+        stop_event.set()
+
+
+def tx(stop_event, wfb_cfg, sock, ip_server, port_server, ch_id, hb_freq, cmd_prfx, wlan):
+    interval = 1.0 / hb_freq if hb_freq > 0 else 1.0
+    config = CommentedConfigParser()
+    while not stop_event.is_set():
+        config.read(wfb_cfg)
+        try:
+            channel = config[wlan]['channel']
+        except KeyError:
+            channel = 'def'
+
+        msg = f"{cmd_prfx}:{ch_id}:{channel}"
+        try:
+            sock.sendto(msg.encode("utf-8"), (ip_server, port_server))
+        except OSError:
+            break
+
+        if stop_event.wait(interval):
+            break
+
+
+@click.command()
+@click.option('--wfb_cfg', default='./wfb_server.cfg', show_default=True, help='target cfg file')
+@click.option('--ip', default='127.0.0.1', show_default=True, help='switcher bind ip')
+@click.option('--port', default=14420, type=int, show_default=True, help='switcher bind port')
+@click.option('--ip_server', default='127.0.0.1', show_default=True, help='channel switcher server ip')
+@click.option('--port_server', default=14410, type=int, show_default=True, help='channel switcher server port')
+@click.option('--ch_id', default=100, type=int, show_default=True, help='channel id')
+@click.option('--hb_freq', default=10, type=float, show_default=True, help='heartbeat frequency (Hz)')
+@click.option('--mpkts', default=2048, type=int, show_default=True, help='max udp packet size')
+@click.option('--cmd_prfx', default='chsw', show_default=True, help='command prefix')
+@click.option('--wlan', default='wlan', show_default=True, help='wlan section to change')
+
+def main(wfb_cfg, ip, port, ip_server, port_server, ch_id, hb_freq, mpkts, cmd_prfx, wlan):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((ip, port))
+    sock.settimeout(0.1)
+
+    stop_event = threading.Event()
+
+    rx_thread = threading.Thread(
+        target=rx,
+        args=(stop_event, wfb_cfg, sock, ch_id, mpkts, wlan),
+        name='ch_switcher_rx',
+        daemon=True,
+    )
+    tx_thread = threading.Thread(
+        target=tx,
+        args=(stop_event, wfb_cfg, sock, ip_server, port_server, ch_id, hb_freq, cmd_prfx, wlan),
+        name='ch_switcher_tx',
+        daemon=True,
+    )
+
+    rx_thread.start()
+    tx_thread.start()
+
+    def shutdown(sig, frame):
+        stop_event.set()
+        try:
+            sock.close()
+        except OSError:
+            pass
+        if sig is not None:
+            print(f'signal {sig} received, shutting down')
+
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    print(wfb_cfg, ip, port, ip_server, port_server, ch_id, hb_freq, wlan, '\\n')
+
+    try:
+        rx_thread.join()
+        tx_thread.join()
+    except KeyboardInterrupt:
+        shutdown(signal.SIGINT, None)
+        rx_thread.join()
+        tx_thread.join()
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+if __name__ == '__main__':
+    main()

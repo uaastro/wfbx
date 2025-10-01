@@ -34,7 +34,7 @@ def spawn_module(name, argv, log_mode="off", log_file=None, env=None, cwd=None):
             pass
         fh = open(log_file, "a", buffering=1)
         popen_kwargs.update(stdout=fh, stderr=subprocess.STDOUT)
-    else:  # "stderr" → прокачиваем в общий лог
+    else:
         popen_kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     p = subprocess.Popen(argv, **popen_kwargs)
     if log_mode == "stderr" and p.stdout is not None:
@@ -47,7 +47,6 @@ def spawn_module(name, argv, log_mode="off", log_file=None, env=None, cwd=None):
 
 
 def kill_all(pl, timeout_ms=10):
-    # SIGTERM всей группе, затем по таймауту SIGKILL
     for rec in pl:
         p = rec["proc"]
         try:
@@ -66,7 +65,6 @@ def kill_all(pl, timeout_ms=10):
                 os.killpg(p.pid, signal.SIGKILL)
             except Exception:
                 pass
-    # закрыть открытые файлы логов
     for rec in pl:
         fh = rec.get("fh")
         if fh:
@@ -76,12 +74,21 @@ def kill_all(pl, timeout_ms=10):
                 pass
     pl.clear()
 
+killed_patterns = set()
+
+def kill_stale_process(pattern):
+    if pattern in killed_patterns:
+        return
+    try:
+        subprocess.run(['pkill', '-9', '-f', pattern], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:
+        print(f'kill_stale_process failed for {pattern}: {exc}')
+    killed_patterns.add(pattern)
 
 @click.command()
 @click.option('--conf', default="wfbx_server.cfg", help='path to config file')
 def main(conf):
     process_list = []  # {name, proc, fh}
-
     kill_timeout_ms = 10
 
     def signal_handler(sig, frame):
@@ -91,7 +98,7 @@ def main(conf):
 
     def cleanup():
         kill_all(process_list, timeout_ms=kill_timeout_ms)
-        
+
     atexit.register(cleanup)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -122,7 +129,7 @@ def main(conf):
 
     try:
         for section in sections:
-            if section[:4] == 'wlan':
+            if section.startswith('wlan'):
                 options = config[section]
                 wlans = options['wlan'].split()
                 channel = options['channel']
@@ -136,20 +143,37 @@ def main(conf):
                     subprocess.run(f"ifconfig {wlan} up", shell=True, check=True)
                     subprocess.run(f"iw dev {wlan} set channel {channel} HT{bandwidth}{bw_pf}", shell=True, check=True)
 
-            elif section[:6] == 'udp_tx':
+            elif section.startswith('udp_tx'):
                 options = config[section]
                 argv = [wfbx_server_dir + "udp_tx",
                         "--ip", options['udp_tx_ip'],
                         "--port", options['udp_tx_port'],
                         "--pksize", options['udp_tx_pksize'],
                         "--pks", options['udp_tx_pks']]
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:12] == 'udp_proxy_tx':
+            elif section.startswith('init_wlans'):
+                options = config[section]
+                script_path = wfbx_server_dir + "init_wlans"
+                argv = [
+                    script_path,
+                    "--wfb_cfg", options.get('iwlx_wfb_cfg', fallback=wfbx_server_dir + 'wfbx_server.cfg'),
+                    "--prfx", options.get('iwlx_prfx', fallback='wlx'),
+                    "--channel", options.get('iwlx_channel', fallback='64'),
+                    "--wlans_nmbr", options.get('iwlx_wlans_nmbr', fallback='1'),
+                    "--wlan_section", options.get('iwlx_wlan_section', fallback='wlan'),
+                ]
+                try:
+                    subprocess.run(argv, check=True)
+                except Exception as exc:
+                    logging.error("init_wlans failed: %s", exc)
+
+            elif section.startswith('udp_proxy_tx'):
                 options = config[section]
                 argv = [wfbx_server_dir + "udp_proxy_tx",
                         "--ip_tx", options['uptx_ip_tx'],
@@ -160,13 +184,14 @@ def main(conf):
                         "--ptxn", options['uptx_ptxn'],
                         "--rpn", options['uptx_rpn'],
                         "--dl", options['uptx_dl']]
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:12] == 'udp_proxy_rx':
+            elif section.startswith('udp_proxy_rx'):
                 options = config[section]
                 argv = [wfbx_server_dir + "udp_proxy_rx",
                         "--ip_tx", options['uprx_ip_tx'],
@@ -178,13 +203,14 @@ def main(conf):
                         "--port_wfbs", options['uprx_port_wfbs'],
                         "--mode", options['uprx_mode'],
                         "--alrt_max", options['uprx_alrt_max']]
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:13] == 'udp_proxy_fwd':
+            elif section.startswith('udp_proxy_fwd'):
                 options = config[section]
                 argv = [wfbx_server_dir + "udp_proxy_fwd",
                         "--ip_tx", options['upfwd_ip_tx'],
@@ -196,26 +222,68 @@ def main(conf):
                         "--rpn", options['upfwd_rpn'],
                         "--dl", options['upfwd_dl'],
                         "--mode", options['upfwd_mode']]
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:11] == 'uart_to_udp':
+            elif section.startswith('ch_switcher'):
+                options = config[section]
+                module_path = wfbx_server_dir + "ch_switcher"
+                argv = [
+                    module_path,
+                    "--wfb_cfg", options.get('chsw_wfb_cfg', fallback=wfbx_server_dir + 'wfbx_server.cfg'),
+                    "--ip", options.get('chsw_ip', fallback='127.0.0.1'),
+                    "--port", options.get('chsw_port', fallback='14420'),
+                    "--ip_server", options.get('chsw_ip_server', fallback='127.0.0.1'),
+                    "--port_server", options.get('chsw_port_server', fallback='5858'),
+                    "--ch_id", options.get('chsw_ch_id', fallback='100'),
+                    "--hb_freq", options.get('chsw_hb_freq', fallback='1'),
+                    "--mpkts", options.get('chsw_mpkts', fallback='2048'),
+                    "--cmd_prfx", options.get('chsw_cmd_prfx', fallback='chsw'),
+                    "--wlan", options.get('chsw_wlan', fallback='wlan'),
+                ]
+                kill_stale_process(argv[0])
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section.startswith('ch_server'):
+                options = config[section]
+                module_path = wfbx_server_dir + "ch_server"
+                argv = [
+                    module_path,
+                    "--ip", options.get('chsv_ip', fallback='127.0.0.1'),
+                    "--port", options.get('chsv_port', fallback='5858'),
+                    "--hb_freq", options.get('chsv_hb_freq', fallback='1'),
+                    "--mpkts", options.get('chsv_mpkts', fallback='2048'),
+                ]
+                kill_stale_process(argv[0])
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section.startswith('uart_to_udp'):
                 options = config[section]
                 argv = [wfbx_server_dir + "uart_to_udp",
                         "--uart", options['utu_uart'],
                         "--brate", options['utu_brate'],
                         "--udps_port", options['utu_udps_port'],
                         "--mode", options['utu_mode']]
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:13] == 'mav_router_rx':
+            elif section.startswith('mav_router_rx'):
                 options = config[section]
                 argv = [wfbx_server_dir + "mav_router_rx",
                         "--ip_r", options['mvrrx_ip_r'],
@@ -224,25 +292,27 @@ def main(conf):
                         "--port_mp", options['mvrrx_port_mp'],
                         "--ip_rtx", options['mvrrx_ip_rtx'],
                         "--port_rtx", options['mvrrx_port_rtx']]
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:13] == 'mav_router_tx':
+            elif section.startswith('mav_router_tx'):
                 options = config[section]
                 argv = [wfbx_server_dir + "mav_router_tx",
                         "--ip_r", options['mvrtx_ip_r'],
                         "--port_r", options['mvrtx_port_r'],
                         "--mode", options['mvrtx_mode']]
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:10] == 'udp_fec_tx':
+            elif section.startswith('udp_fec_tx'):
                 options = config[section]
                 argv = [wfbx_server_dir + "udp_fec_tx",
                         "--mpkts", options['uftx_mpkts'],
@@ -252,13 +322,14 @@ def main(conf):
                         "--port_tx", options['uftx_port_tx'],
                         "--k", options['uftx_k'],
                         "--m", options['uftx_m']]
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:10] == 'udp_fec_rx':
+            elif section.startswith('udp_fec_rx'):
                 options = config[section]
                 argv = [wfbx_server_dir + "udp_fec_rx",
                         "--mpkts", options['ufrx_mpkts'],
@@ -268,26 +339,28 @@ def main(conf):
                         "--port_tx", options['ufrx_port_tx'],
                         "--port_wfbs", options['ufrx_port_wfbs'],
                         "--ip_wfbs", options['ufrx_ip_wfbs']]
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:11] == 'udp_to_uart':
+            elif section.startswith('udp_to_uart'):
                 options = config[section]
                 argv = [wfbx_server_dir + "udp_to_uart",
                         "--port_rx", options['udtu_port_rx'],
                         "--ip_rx", options['udtu_ip_rx'],
                         "--uart", options['udtu_uart'],
                         "--brate", options['udtu_brate']]
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:2] == 'mx':
+            elif section.startswith('mx'):
                 # wfbx_mx
                 options = config[section]
                 argv = [wfbx_server_dir + "wfbx_mx",
@@ -302,13 +375,14 @@ def main(conf):
                         "--stat_ip", options['mx_stat_ip'],
                         "--stat_port", options['mx_stat_port'],
                         "--stat_id", section] + wlans
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:3] == 'xtx':
+            elif section.startswith('xtx'):
                 # wfbx_tx
                 options = config[section]
                 argv = [wfbx_server_dir + "wfbx_tx",
@@ -340,13 +414,14 @@ def main(conf):
                         "--stat_id", section,
                         "--stat_period", options['xtx_stat_period'],
                         "--epoch_sync", options['xtx_epoch_sync']] + wlans
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:3] == 'xrx':
+            elif section.startswith('xrx'):
                 # wfbx_rx
                 options = config[section]
                 argv = [wfbx_server_dir + "wfbx_rx",
@@ -360,13 +435,14 @@ def main(conf):
                         "--stat_port", options['xrx_stat_port'],
                         "--stat_id", section,
                         "--stat_period", options['xrx_stat_period']] + wlans
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:2] == 'tx':
+            elif section.startswith('tx'):
                 # legacy wfb_tx
                 options = config[section]
                 argv = [wfbx_server_dir + "wfb_tx",
@@ -384,13 +460,14 @@ def main(conf):
                         "--stat_ip", options['tx_stat_ip'],
                         "--stat_port", options['tx_stat_port'],
                         "--stat_id", section] + wlans
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:2] == 'rx':
+            elif section.startswith('rx'):
                 # legacy wfb_rx
                 options = config[section]
                 argv = [wfbx_server_dir + "wfb_rx",
@@ -403,6 +480,7 @@ def main(conf):
                         "--stat_port", options['rx_stat_port'],
                         "--stat_id", section,
                         "--stat_period", options['rx_stat_period']] + wlans
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
@@ -416,18 +494,20 @@ def main(conf):
                         "--mcast", options['statd_mcast'],
                         "--host_id", options['statd_host_id'],
                         "--max_len", options['statd_max_len']]
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section[:4] == 'util':
+            elif section.startswith('exec'):
                 options = config[section]
-                argv = [options['util_exec']]
-                param_list = options.get('util_param', '').split(' ')
+                argv = [options['exec_exec']]
+                param_list = options.get('exec_argv', '').split(' ')
                 if param_list != ['']:
                     argv += param_list
+                kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
                 p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
@@ -437,7 +517,6 @@ def main(conf):
         logging.info("wfbX_server started")
 
         while True:
-            # мониторим завершения
             for rec in list(process_list):
                 p = rec["proc"]
                 rc = p.poll()

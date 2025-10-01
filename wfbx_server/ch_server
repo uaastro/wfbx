@@ -1,0 +1,135 @@
+#!/usr/bin/python3
+import click
+import socket
+import signal
+import threading
+
+
+def tx(stop_event, sock, clients, channels, lock, hb_freq):
+    interval = 1.0 / hb_freq if hb_freq > 0 else 1.0
+    while not stop_event.is_set():
+        with lock:
+            active_clients = list(clients)
+            channel_map = dict(channels)
+
+        for addr, channel_id in active_clients:
+            payload = f"{channel_id}:{channel_map.get(channel_id, 'def')}"
+            try:
+                sock.sendto(payload.encode("utf-8"), addr)
+            except OSError:
+                stop_event.set()
+                break
+
+        if stop_event.wait(interval):
+            break
+
+
+def rx(stop_event, sock, clients, channels, lock, mpkts):
+    while not stop_event.is_set():
+        try:
+            data, addr = sock.recvfrom(mpkts)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+
+        try:
+            line = data.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            continue
+
+        parts = line.split(':')
+        if not parts:
+            continue
+
+        prefix = parts[0]
+        if prefix == 'chsw' and len(parts) >= 2:
+            channel_id = parts[1]
+            client = (addr, channel_id)
+            with lock:
+                replaced = False
+                for idx, existing in enumerate(clients):
+                    if existing == client:
+                        replaced = True
+                        break
+                    if existing[0] == addr:
+                        print('client updated:', existing, '->', client)
+                        clients[idx] = client
+                        replaced = True
+                        break
+                if not replaced:
+                    clients.append(client)
+                    print('new client added:', client)
+                channels.setdefault(channel_id, 'def')
+
+        elif prefix == 'set_ch' and len(parts) >= 3:
+            channel_id, value = parts[1], parts[2]
+            with lock:
+                channels[channel_id] = value
+            print('set_ch:', parts)
+
+
+@click.command()
+@click.option('--ip', default='127.0.0.1', show_default=True, help='server bind ip')
+@click.option('--port', default=5858, type=int, show_default=True, help='server bind port')
+@click.option('--hb_freq', default=10, type=float, show_default=True, help='heartbeat frequency (Hz)')
+@click.option('--mpkts', default=2048, type=int, show_default=True, help='max udp packet size')
+
+def main(ip, port, hb_freq, mpkts):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((ip, port))
+    sock.settimeout(0.1)
+
+    clients = []
+    channels = {}
+    lock = threading.RLock()
+    stop_event = threading.Event()
+
+    tx_thread = threading.Thread(
+        target=tx,
+        args=(stop_event, sock, clients, channels, lock, hb_freq),
+        name='ch_server_tx',
+        daemon=True,
+    )
+    rx_thread = threading.Thread(
+        target=rx,
+        args=(stop_event, sock, clients, channels, lock, mpkts),
+        name='ch_server_rx',
+        daemon=True,
+    )
+
+    tx_thread.start()
+    rx_thread.start()
+
+    def shutdown(sig, frame):
+        stop_event.set()
+        try:
+            sock.close()
+        except OSError:
+            pass
+        if sig is not None:
+            print(f'signal {sig} received, shutting down')
+
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    print('ch_server had started...')
+    print(f'server @{ip}:{port} hb_freq:{hb_freq}')
+
+    try:
+        tx_thread.join()
+        rx_thread.join()
+    except KeyboardInterrupt:
+        shutdown(signal.SIGINT, None)
+        tx_thread.join()
+        rx_thread.join()
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+if __name__ == '__main__':
+    main()

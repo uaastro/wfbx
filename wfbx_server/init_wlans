@@ -1,0 +1,55 @@
+#!/usr/bin/python3
+
+import psutil
+import click
+from commentedconfigparser import CommentedConfigParser
+
+@click.command()
+@click.option('--wfb_cfg', default='./wfb_server.cfg', show_default=True, help='target cfg file')
+@click.option('--prfx', default='wlx', show_default=True, help='wlan interface prefix')
+@click.option('--channel', default='64', show_default=True, help='wifi channel')
+@click.option('--wlans_nmbr', default=1, type=int, show_default=True, help='number of wlans to add')
+@click.option('--wlan_section', default='wlan', show_default=True, help='wlan section of wfb_cfg file')
+
+def main(wfb_cfg, prfx, channel, wlans_nmbr, wlan_section):
+    
+    def get_wlans_list(prfx):
+        wlans = []
+        if_list = psutil.net_if_addrs().keys()
+        for if_name in if_list:
+            if if_name[:len(prfx)] == prfx:
+                wlans.append(if_name)
+        
+        return wlans
+    
+#--------------------------------------------
+    config = CommentedConfigParser()
+    config.read(wfb_cfg)
+
+    wlans_list = get_wlans_list(prfx)
+    if not wlans_list:
+        print('No WLAN interfaces found with prefix', prfx)
+        return
+
+    if wlans_nmbr <= 0:
+        print('wlans_nmbr must be greater than zero')
+        return
+
+    selected_wlans = wlans_list[:wlans_nmbr]
+    if not selected_wlans:
+        print('No WLAN interfaces available to update config')
+        return
+
+    wlans = ' '.join(selected_wlans)
+
+    if wlan_section not in config:
+        print(f"Section '{wlan_section}' not found in {wfb_cfg}")
+        return
+
+    config[wlan_section]['wlan'] = wlans
+
+    with open(wfb_cfg,'w') as configfile:
+        config.write(configfile)
+
+if __name__ == '__main__':
+    main()
