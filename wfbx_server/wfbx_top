@@ -712,14 +712,13 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
     ordered = [modules[key] for key in sorted(modules.keys())]
     panels = [render_module(rec, now) for rec in ordered]
 
-    # Columns с несколькими широкими панелями (например, несколькими xrx)
-    # способен «зависнуть» из-за особенностей расчёта ширины. Если панелей
-    # больше двух, безопаснее вывести их вертикально.
     if len(panels) <= 2:
         layout = Columns(panels, expand=True)
     else:
         layout = Group(*panels)
 
+    layout = Columns(panels, expand=True)
+    
     return Panel(layout, border_style="blue", title="wfbx_top")
 
 
