@@ -14,6 +14,7 @@ from rich import box
 from rich.align import Align
 from rich.columns import Columns
 from rich.console import Console, Group
+import traceback
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
@@ -791,7 +792,12 @@ def main(mcast_ip: str,
                         continue
                     modules[record.key] = record
             prune_stale(modules, now, idle_sec)
-            live.update(render_dashboard(modules, now))
+            try:
+                renderable = render_dashboard(modules, now)
+            except Exception:
+                console.log("[TOP] render failed:\n" + traceback.format_exc())
+            else:
+                live.update(renderable, refresh=True)
 
 
 if __name__ == "__main__":
