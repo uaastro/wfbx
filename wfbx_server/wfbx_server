@@ -421,25 +421,16 @@ def main(conf):
 
             elif section.startswith('ptx'):
                 options = config[section]
-                ptx_ip = options.get('ptx_ip', defaults.get('ptx_ip', '0.0.0.0'))
-                ptx_port = options.get('ptx_port', defaults.get('ptx_port', '5600'))
-                ptx_radio = options.get('ptx_radio_port', defaults.get('ptx_radio_port', '0'))
-                ptx_xtx_ip = options.get('ptx_xtx_ip', defaults.get('ptx_xtx_ip', '127.0.0.1'))
-                ptx_xtx_port = options.get('ptx_xtx_port', defaults.get('ptx_xtx_port', '4600'))
-                ptx_stat_period = options.get('ptx_stat_period', defaults.get('ptx_stat_period', '1000'))
-                ptx_stat_ip = options.get('ptx_stat_ip', defaults.get('ptx_stat_ip', '127.0.0.1'))
-                ptx_stat_port = options.get('ptx_stat_port', defaults.get('ptx_stat_port', '9601'))
-                ptx_stat_id = options.get('ptx_stat_id', section)
                 argv = [wfbx_server_dir + "wfbx_ptx",
-                        "--ip", ptx_ip,
-                        "--port", ptx_port,
-                        "--radio_port", ptx_radio,
-                        "--xtx_ip", ptx_xtx_ip,
-                        "--xtx_port", ptx_xtx_port,
-                        "--stat_period", ptx_stat_period,
-                        "--stat_ip", ptx_stat_ip,
-                        "--stat_port", ptx_stat_port,
-                        "--stat_id", ptx_stat_id]
+                        "--ip", options['ptx_ip'],
+                        "--port", options['ptx_port'],
+                        "--radio_port", options['ptx_radio_port'],
+                        "--xtx_ip", options['ptx_xtx_ip'],
+                        "--xtx_port", options['ptx_xtx_port'],
+                        "--stat_period", options['ptx_stat_period'],
+                        "--stat_ip", options['ptx_stat_ip'],
+                        "--stat_port", options['ptx_stat_port'],
+                        "--stat_id", section]
                 kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
@@ -450,7 +441,6 @@ def main(conf):
             elif section.startswith('xtx'):
                 # wfbx_tx
                 options = config[section]
-                xtx_mode = options.get('mode', defaults.get('mode', 'ptx'))
                 argv = [wfbx_server_dir + "wfbx_tx",
                         "--ip", options['xtx_ip'],
                         "--port", options['xtx_port'],
@@ -463,7 +453,7 @@ def main(conf):
                         "--tx_id", options['xtx_tx_id'],
                         "--link_id", options['xtx_link_id'],
                         "--radio_port", options['xtx_radio_port'],
-                        "--mode", xtx_mode,
+                        "--mode", options['xtx_mode'],
                         "--mx", options['xtx_mx'],
                         "--epoch_len", options['xtx_epoch_len'],
                         "--epoch_gi", options['xtx_epoch_gi'],

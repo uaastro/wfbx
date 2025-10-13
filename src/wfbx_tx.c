@@ -69,6 +69,16 @@
 
 #define WFBX_TX_STATS_MAX_PACKET 512
 
+typedef enum {
+  WFBX_TX_INPUT_SOLO = 0,
+  WFBX_TX_INPUT_PTX  = 1
+} wfbx_tx_input_mode_t;
+
+static inline const char* wfbx_tx_input_mode_name(wfbx_tx_input_mode_t mode)
+{
+  return (mode == WFBX_TX_INPUT_PTX) ? "ptx" : "solo";
+}
+
 static int            g_stat_sock = -1;
 static struct sockaddr_in g_stat_addr;
 static int            g_stat_enabled = 0;
@@ -77,6 +87,8 @@ static size_t         g_stat_packet_len = 0;
 static uint32_t       g_stat_tick_id = 0;
 static char           g_stat_module_id[24] = "tx";
 static char           g_iface_name[64] = {0};
+
+static wfbx_tx_input_mode_t g_input_mode = WFBX_TX_INPUT_SOLO;
 
 static int stats_append_section(uint8_t* dst, size_t* offset, size_t cap,
                                 uint16_t type, const uint8_t* data, uint16_t length);
@@ -221,6 +233,7 @@ static void print_help(const char* prog)
     "  --tx_id <id>          Transmitter ID (addr2[5]) [%d]\n"
     "  --link_id <id>        Link ID (addr3[4]) [%d]\n"
     "  --radio_port <id>     Radio Port (addr3[5]) [%d]\n"
+    "  --mode <solo|ptx>     Input source mode [%s]\n"
     "  --mx <@name>          Control UDS abstract addr [%s]\n"
     "  --epoch_len <us>      Superframe length [%u]\n"
     "  --epoch_gi <us>       Inter-superframe guard (pre-prop) [%u]\n"
@@ -247,6 +260,7 @@ static void print_help(const char* prog)
     1,
     1,
     0, 0, 0, 0,
+    wfbx_tx_input_mode_name(WFBX_TX_INPUT_SOLO),
     "@wfbx.mx",
     50000u,
     400u,
@@ -1206,16 +1220,38 @@ static int send_packet(pcap_t* ph,
                        uint8_t mcs_idx, int gi_short, int bw40, int ldpc, int stbc,
                        uint8_t group_id, uint8_t tx_id, uint8_t link_id, uint8_t radio_port)
 {
+  uint8_t radio_port_eff = radio_port;
+  uint16_t seq_eff = (uint16_t)(seq_num & WFBX_SEQ12_MASK);
+  const uint8_t* payload_body = payload;
+  size_t payload_len_body = payload_len;
+
+  if (g_input_mode == WFBX_TX_INPUT_PTX) {
+    if (payload_len_body < WFBX_PTX_HDR_BYTES) {
+      fprintf(stderr, "[PTX] payload too short (%zu) for header\n", payload_len_body);
+      return -1;
+    }
+    struct wfbx_ptx_hdr hdr;
+    memcpy(&hdr, payload_body, sizeof(hdr));
+    radio_port_eff = hdr.radio_port;
+    seq_eff = (uint16_t)(ntohs(hdr.seq_be) & WFBX_SEQ12_MASK);
+    payload_body += WFBX_PTX_HDR_BYTES;
+    payload_len_body -= WFBX_PTX_HDR_BYTES;
+    if (payload_len_body == 0) {
+      fprintf(stderr, "[PTX] empty payload after header\n");
+      return -1;
+    }
+  }
+
   uint8_t frame[MAX_FRAME];
   size_t pos = 0;
 
   pos += build_radiotap(frame + pos, mcs_idx, gi_short, bw40, ldpc, stbc);
-  pos += build_dot11  (frame + pos, seq_num, group_id, tx_id, link_id, radio_port);
+  pos += build_dot11  (frame + pos, seq_eff, group_id, tx_id, link_id, radio_port_eff);
 
-  if (payload_len > 0) {
-    if (pos + payload_len > sizeof(frame)) return -1;
-    memcpy(frame + pos, payload, payload_len);
-    pos += payload_len;
+  if (payload_len_body > 0) {
+    if (pos + payload_len_body > sizeof(frame)) return -1;
+    memcpy(frame + pos, payload_body, payload_len_body);
+    pos += payload_len_body;
   }
   /* Append mesh trailer: epoch (LE64) + ts_tx (LE64, 0) + ts_rx (LE64, 0).
      Driver will overwrite ts_tx/ts_rx in-place. */
@@ -1247,6 +1283,7 @@ int main(int argc, char** argv) {
   int stat_port = 9601;
   const char* stat_id = "tx";
   const char* mx_addr_cli = "@wfbx.mx";
+  wfbx_tx_input_mode_t input_mode = WFBX_TX_INPUT_SOLO;
 
   static struct option longopts[] = {
     {"ip",         required_argument, 0, 0},
@@ -1263,6 +1300,7 @@ int main(int argc, char** argv) {
     {"tx_id",      required_argument, 0, 0},
     {"link_id",    required_argument, 0, 0},
     {"radio_port", required_argument, 0, 0},
+    {"mode",       required_argument, 0, 0},
     {"mx",         required_argument, 0, 0}, /* MX UDS abstract address */
     {"epoch_len",  required_argument, 0, 0},
     {"epoch_gi",   required_argument, 0, 0},
@@ -1310,6 +1348,11 @@ int main(int argc, char** argv) {
       else if (strcmp(name,"tx_id")==0)    tx_id    = atoi(val);
       else if (strcmp(name,"link_id")==0)  link_id  = atoi(val);
       else if (strcmp(name,"radio_port")==0) radio_port = atoi(val);
+      else if (strcmp(name,"mode")==0) {
+        if      (strcasecmp(val, "solo") == 0 || strcasecmp(val, "classic") == 0) input_mode = WFBX_TX_INPUT_SOLO;
+        else if (strcasecmp(val, "ptx")  == 0 || strcasecmp(val, "mux") == 0)     input_mode = WFBX_TX_INPUT_PTX;
+        else fprintf(stderr,"Unknown --mode value '%s' (use solo|ptx)\n", val);
+      }
       else if (strcmp(name,"mx")==0)       mx_addr_cli = val;
       else if (strcmp(name,"epoch_len")==0)  g_epoch_len_us = (uint32_t)atoi(val);
       else if (strcmp(name,"epoch_gi")==0)   g_epoch_gi_us  = (uint32_t)atoi(val);
@@ -1342,11 +1385,13 @@ int main(int argc, char** argv) {
 
   if (optind >= argc) {
     fprintf(stderr, "Usage: sudo %s [--ip 0.0.0.0] [--port 5600] [--mcs_idx N] [--gi short|long] [--bw 20|40]\n"
-                    "                [--ldpc 0|1] [--stbc 0..3] [--group_id G] [--tx_id T] [--link_id L] [--radio_port P] <wlan_iface>\n",
+                    "                [--ldpc 0|1] [--stbc 0..3] [--group_id G] [--tx_id T] [--link_id L] [--radio_port P]\n"
+                    "                [--mode solo|ptx] <wlan_iface>\n",
             argv[0]);
     return 1;
   }
   const char* iface = argv[optind];
+  g_input_mode = input_mode;
   snprintf(g_iface_name, sizeof(g_iface_name), "%s", iface);
 
   /* Prepare stats module metadata */
@@ -1434,9 +1479,11 @@ int main(int argc, char** argv) {
   pthread_mutex_unlock(&g_epoch_base.mtx);
   epoch_base_init_from_start(g_epoch_start_us);
 
-  fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d | mx=%s | stats -> %s:%d id=%s\n",
+  fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d | mode=%s | mx=%s | stats -> %s:%d id=%s\n",
           ip, port, iface, mcs_idx, gi_short?"short":"long", bw40?"40":"20",
-          ldpc, stbc, group_id, tx_id, link_id, radio_port, mx_addr_cli,
+          ldpc, stbc, group_id, tx_id, link_id, radio_port,
+          wfbx_tx_input_mode_name(g_input_mode),
+          mx_addr_cli,
           stat_ip, stat_port, stat_id);
 
   /* Make UDP socket non-blocking */
