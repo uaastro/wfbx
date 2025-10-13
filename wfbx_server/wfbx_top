@@ -726,15 +726,23 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
         layout = Group(*panels)
     else:
         max_width = max(20, (term_width // cols) - 4)
-        constrained = [Constrain(panel, width=max_width) for panel in panels]
-        try:
-            layout = Columns(constrained, expand=True, equal=True)
-        except Exception as exc:  # pragma: no cover - fallback path
+        rows = []
+        empty_panel = Panel(Text(""), border_style="black")
+        for idx in range(0, len(panels), cols):
+            row_items = panels[idx:idx + cols]
+            if len(row_items) < cols:
+                row_items = row_items + [empty_panel] * (cols - len(row_items))
+            constrained = [Constrain(item, width=max_width) for item in row_items]
             try:
-                console.log(f"[TOP] Columns constrained fallback: {exc}")
-            except Exception:
-                pass
-            layout = Group(*panels)
+                row = Columns(constrained, expand=True, equal=True)
+            except Exception as exc:  # pragma: no cover
+                try:
+                    console.log(f"[TOP] Columns row fallback: {exc}")
+                except Exception:
+                    pass
+                row = Group(*row_items)
+            rows.append(row)
+        layout = Group(*rows)
 
     return Panel(layout, border_style="blue", title="wfbx_top")
 
