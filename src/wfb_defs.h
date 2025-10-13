@@ -206,6 +206,23 @@ struct wfbx_mesh_trailer {
 
 #define WFBX_TRAILER_BYTES ((unsigned)sizeof(struct wfbx_mesh_trailer))
 
+#define WFBX_SEQ12_MASK 0x0FFFu
+
+/* ---- PTX (pre-TX) mux header ------------------------------------------------ */
+/*
+ * Minimal header prepended by wfbx_ptx before forwarding to wfbx_tx.
+ *  - radio_port: logical radio port to populate into addr3[5].
+ *  - seq_be: 12-bit sequence number in network byte order (upper bits cleared).
+ */
+#pragma pack(push,1)
+struct wfbx_ptx_hdr {
+  uint8_t  radio_port;
+  uint16_t seq_be;      /* seq in network order, masked with WFBX_SEQ12_MASK */
+};
+#pragma pack(pop)
+
+#define WFBX_PTX_HDR_BYTES ((unsigned)sizeof(struct wfbx_ptx_hdr))
+
 /* Legacy trailer sizes (unused in new flow) */
 /* #define WFBX_TRAILER12_BYTES 12u */
 /* #define WFBX_TRAILER8_BYTES   8u */

@@ -19,6 +19,9 @@ $CC $CFLAGS -o ./bin/wfbx_rx ./src/wfbx_rx.c ./src/wfbx_ifutil.c ./src/wfbx_stat
 echo "[BUILD] wfbx_mx"
 $CC $CFLAGS -o ./bin/wfbx_mx ./src/wfbx_mx.c ./src/wfbx_ifutil.c ./src/wfbx_stats_core.c ./src/wfbx_stats_mx.c $LDFLAGS_COMMON -lpcap -lm
 
+echo "[BUILD] wfbx_ptx"
+$CC $CFLAGS -o ./bin/wfbx_ptx ./src/wfbx_ptx.c ./src/wfbx_stats_core.c ./src/wfbx_stats_ptx.c $LDFLAGS_COMMON -lm
+
 echo "[BUILD] legacy wfb_tx"
 $CC $CFLAGS -o ./bin/wfb_tx ./src/wfb_tx.c $LDFLAGS_COMMON -lpcap
 

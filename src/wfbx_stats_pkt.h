@@ -9,5 +9,6 @@
 #include "wfbx_stats_rx.h"
 #include "wfbx_stats_mx.h"
 #include "wfbx_stats_tx.h"
+#include "wfbx_stats_ptx.h"
 
 #endif /* WFBX_STATS_PKT_H */
