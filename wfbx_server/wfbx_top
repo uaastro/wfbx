@@ -712,18 +712,27 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
     ordered = [modules[key] for key in sorted(modules.keys())]
     panels = [render_module(rec, now) for rec in ordered]
 
-    layout = None
-    if panels:
-        try:
-            layout = Columns(panels, expand=True)
-        except Exception as exc:  # pragma: no cover - fallback path
-            try:
-                console.log(f"[TOP] Columns fallback: {exc}")
-            except Exception:
-                pass
-            layout = Group(*panels)
+    term_width = console.size.width if console.size else 80
+
+    if len(panels) >= 3 and term_width >= 200:
+        cols = 3
+    elif len(panels) >= 2 and term_width >= 120:
+        cols = 2
     else:
-        layout = Group()
+        cols = 1
+
+    if cols == 1:
+        layout = Group(*panels)
+    else:
+        grid = Table.grid(expand=True, padding=(0, 1))
+        for _ in range(cols):
+            grid.add_column()
+        for idx in range(0, len(panels), cols):
+            row = panels[idx:idx + cols]
+            if len(row) < cols:
+                row = row + [None] * (cols - len(row))
+            grid.add_row(*row)
+        layout = grid
 
     return Panel(layout, border_style="blue", title="wfbx_top")
 
