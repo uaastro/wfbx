@@ -14,10 +14,11 @@ from rich import box
 from rich.align import Align
 from rich.columns import Columns
 from rich.console import Console, Group
+from rich.constrain import Constrain
+from rich.table import Table
 import traceback
 from rich.live import Live
 from rich.panel import Panel
-from rich.table import Table
 from rich.text import Text
 
 from wfbxlib.stats import core as stats_core
@@ -724,19 +725,16 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
     if cols == 1:
         layout = Group(*panels)
     else:
-        rows = []
-        for idx in range(0, len(panels), cols):
-            row_items = panels[idx:idx + cols]
+        max_width = max(20, (term_width // cols) - 4)
+        constrained = [Constrain(panel, max_width=max_width) for panel in panels]
+        try:
+            layout = Columns(constrained, expand=True, equal=True)
+        except Exception as exc:  # pragma: no cover - fallback path
             try:
-                row = Columns(row_items, expand=True, equal=True)
-            except Exception as exc:  # pragma: no cover - fallback path
-                try:
-                    console.log(f"[TOP] Columns row fallback: {exc}")
-                except Exception:
-                    pass
-                row = Group(*row_items)
-            rows.append(row)
-        layout = Group(*rows)
+                console.log(f"[TOP] Columns constrained fallback: {exc}")
+            except Exception:
+                pass
+            layout = Group(*panels)
 
     return Panel(layout, border_style="blue", title="wfbx_top")
 
