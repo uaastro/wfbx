@@ -726,7 +726,7 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
         layout = Group(*panels)
     else:
         max_width = max(20, (term_width // cols) - 4)
-        constrained = [Constrain(panel, max_width=max_width) for panel in panels]
+        constrained = [Constrain(panel, width=max_width) for panel in panels]
         try:
             layout = Columns(constrained, expand=True, equal=True)
         except Exception as exc:  # pragma: no cover - fallback path
