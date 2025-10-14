@@ -251,21 +251,28 @@ def build_record(datagram: bytes, now: float) -> ModuleRecord:
     )
 
 
+def _parse_filter_list(raw: str) -> List[str]:
+    if not raw:
+        return []
+    return [part.strip().lower() for part in raw.split(",") if part.strip()]
+
+
 def matches_filters(record: ModuleRecord,
-                    module_id_filter: str,
-                    module_type_filter: str,
+                    module_id_filters: List[str],
+                    module_type_filters: List[str],
                     host_id_filter: str) -> bool:
     module_id = record.header.module_id or ""
     host_id = record.header.host_id or ""
-    if module_id_filter and module_id_filter.lower() not in module_id.lower():
-        return False
+    module_id_lower = module_id.lower()
+    if module_id_filters:
+        if not any(filt in module_id_lower for filt in module_id_filters):
+            return False
     if host_id_filter and host_id_filter.lower() not in host_id.lower():
         return False
-    if module_type_filter:
+    if module_type_filters:
         mt = record.kind.lower()
         mt_name = record.header.module_type.name.lower()
-        filt = module_type_filter.lower()
-        if filt not in mt and filt not in mt_name:
+        if not any(filt in mt or filt in mt_name for filt in module_type_filters):
             return False
     return True
 
@@ -723,8 +730,8 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
 @click.option("--ip", "mcast_ip", default="239.255.0.1", show_default=True, help="Multicast group IP")
 @click.option("--port", default=9100, type=int, show_default=True, help="Multicast group port")
 @click.option("--idle-ms", default=4000, type=int, show_default=True, help="Evict module if idle longer than this (ms)")
-@click.option("--module-id", "module_id_filter", default="", help="Substring filter for module_id")
-@click.option("--module-type", "module_type_filter", default="", help="Substring filter for module_type")
+@click.option("--module-id", "module_id_filter", default="", help="Подстрочный фильтр(ы) для module_id, разделяйте запятыми")
+@click.option("--module-type", "module_type_filter", default="", help="Подстрочный фильтр(ы) для module_type, разделяйте запятыми")
 @click.option("--host-id", "host_id_filter", default="", help="Substring filter for host_id")
 @click.option(
     "--view-mode",
@@ -767,6 +774,9 @@ def main(mcast_ip: str,
     total_packets = 0
     filtered_packets = 0
 
+    module_id_filters = _parse_filter_list(module_id_filter)
+    module_type_filters = _parse_filter_list(module_type_filter)
+
     global VIEW_MODE
     VIEW_MODE = view_mode.lower()
 
@@ -793,7 +803,7 @@ def main(mcast_ip: str,
                     except Exception as exc:
                         console.log(f"[TOP] decode failed: {exc}")
                         continue
-                    if not matches_filters(record, module_id_filter, module_type_filter, host_id_filter):
+                    if not matches_filters(record, module_id_filters, module_type_filters, host_id_filter):
                         filtered_packets += 1
                         console.log(f"[TOP] filtered module_id={record.header.module_id} host_id={record.header.host_id}")
                         continue
