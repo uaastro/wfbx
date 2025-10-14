@@ -25,6 +25,7 @@ from wfbxlib.stats import tx as stats_tx
 from wfbxlib.stats import rx as stats_rx
 
 console = Console()
+VIEW_MODE = "summary"
 
 @dataclass
 class ModuleRecord:
@@ -386,58 +387,59 @@ def render_mx(record: ModuleRecord) -> Group:
 
             blocks.append(tx_table)
 
-            # Antenna-level detail for this TX
-            chain_rows: List[List[object]] = []
-            for if_entry in record.if_entries:
-                if if_entry.tx_id != entry.tx_id:
-                    continue
-                iface_id = if_entry.iface_id
-                freq_text = f"{if_entry.freq_mhz}" if getattr(if_entry, "freq_mhz", 0) else "-"
-                for chain in if_entry.chains:
-                    chain_quality = chain.quality_permille / 10.0
-                    chain_rssi = chain.rssi_avg_q8 / 256.0
-                    chain_rows.append(
-                        [
-                            f"{iface_id}",
-                            freq_text,
-                            f"{chain.ant_id}",
-                            f"{chain.packets}",
-                            f"{chain.lost}",
-                            f"{chain_rssi:.1f}",
-                            render_signal_bar_text(chain_rssi, glyph="❘"),
-                            f"{chain_quality:.1f}"
-                        ]
-                    )
+            if VIEW_MODE == "full":
+                # Antenna-level detail for this TX (show only in full mode)
+                chain_rows: List[List[object]] = []
+                for if_entry in record.if_entries:
+                    if if_entry.tx_id != entry.tx_id:
+                        continue
+                    iface_id = if_entry.iface_id
+                    freq_text = f"{if_entry.freq_mhz}" if getattr(if_entry, "freq_mhz", 0) else "-"
+                    for chain in if_entry.chains:
+                        chain_quality = chain.quality_permille / 10.0
+                        chain_rssi = chain.rssi_avg_q8 / 256.0
+                        chain_rows.append(
+                            [
+                                f"{iface_id}",
+                                freq_text,
+                                f"{chain.ant_id}",
+                                f"{chain.packets}",
+                                f"{chain.lost}",
+                                f"{chain_rssi:.1f}",
+                                render_signal_bar_text(chain_rssi, glyph="❘"),
+                                f"{chain_quality:.1f}"
+                            ]
+                        )
 
-            if chain_rows:
-                chain_table = Table(
-                    show_header=True,
-                    header_style="cyan",
-                    expand=True,
-                    box=None,
-                    padding=(0, 1),
-                )
-                chain_table.add_column("if", justify="right")
-                chain_table.add_column("freq", justify="right")
-                chain_table.add_column("ant", justify="right")
-                chain_table.add_column("pkts", justify="right")
-                chain_table.add_column("lost", justify="right")
-                chain_table.add_column("rssi", justify="right")
-                chain_table.add_column("signal", justify="center")
-                chain_table.add_column("qlt %", justify="right")
-                for row in chain_rows:
-                    styled_row = [
-                        Text(row[0], style="bright_black"),
-                        Text(row[1], style="bright_black"),
-                        Text(row[2], style="bright_black"),
-                        Text(row[3], style="bright_black"),
-                        Text(row[4], style="bright_black"),
-                        Text(row[5], style="bright_black"),
-                        row[6],
-                        Text(row[7], style="bright_black"),
-                    ]
-                    chain_table.add_row(*styled_row)
-                blocks.append(chain_table)
+                if chain_rows:
+                    chain_table = Table(
+                        show_header=True,
+                        header_style="cyan",
+                        expand=True,
+                        box=None,
+                        padding=(0, 1),
+                    )
+                    chain_table.add_column("if", justify="right")
+                    chain_table.add_column("freq", justify="right")
+                    chain_table.add_column("ant", justify="right")
+                    chain_table.add_column("pkts", justify="right")
+                    chain_table.add_column("lost", justify="right")
+                    chain_table.add_column("rssi", justify="right")
+                    chain_table.add_column("signal", justify="center")
+                    chain_table.add_column("qlt %", justify="right")
+                    for row in chain_rows:
+                        styled_row = [
+                            Text(row[0], style="bright_black"),
+                            Text(row[1], style="bright_black"),
+                            Text(row[2], style="bright_black"),
+                            Text(row[3], style="bright_black"),
+                            Text(row[4], style="bright_black"),
+                            Text(row[5], style="bright_black"),
+                            row[6],
+                            Text(row[7], style="bright_black"),
+                        ]
+                        chain_table.add_row(*styled_row)
+                    blocks.append(chain_table)
             blocks.append(Text(""))
 
     if record.text_preview:
@@ -603,45 +605,46 @@ def render_rx(record: ModuleRecord) -> Group:
 
         blocks.append(tx_table)
 
-        for entry in record.rx_tx_entries:
-            chain_rows: List[List[object]] = []
-            for if_entry in sorted(record.rx_if_entries, key=lambda d: (d.tx_id, d.iface_id)):
-                if if_entry.tx_id != entry.tx_id:
-                    continue
-                freq_text = f"{if_entry.freq_mhz}" if if_entry.freq_mhz else "-"
-                for chain in if_entry.chains:
-                    chain_quality = chain.quality_permille / 10.0
-                    chain_rssi = chain.rssi_avg_q8 / 256.0
-                    chain_rows.append([
-                        Text(str(if_entry.iface_id), style="bright_black"),
-                        Text(freq_text, style="bright_black"),
-                        Text(str(chain.ant_id), style="bright_black"),
-                        Text(str(chain.packets), style="bright_black"),
-                        Text(str(chain.lost), style="bright_black"),
-                        Text(f"{chain_rssi:.1f}", style="bright_black"),
-                        render_signal_bar_text(chain_rssi, glyph="❘"),
-                        Text(f"{chain_quality:.1f}", style="bright_black"),
-                    ])
+        if VIEW_MODE == "full":
+            for entry in record.rx_tx_entries:
+                chain_rows: List[List[object]] = []
+                for if_entry in sorted(record.rx_if_entries, key=lambda d: (d.tx_id, d.iface_id)):
+                    if if_entry.tx_id != entry.tx_id:
+                        continue
+                    freq_text = f"{if_entry.freq_mhz}" if if_entry.freq_mhz else "-"
+                    for chain in if_entry.chains:
+                        chain_quality = chain.quality_permille / 10.0
+                        chain_rssi = chain.rssi_avg_q8 / 256.0
+                        chain_rows.append([
+                            Text(str(if_entry.iface_id), style="bright_black"),
+                            Text(freq_text, style="bright_black"),
+                            Text(str(chain.ant_id), style="bright_black"),
+                            Text(str(chain.packets), style="bright_black"),
+                            Text(str(chain.lost), style="bright_black"),
+                            Text(f"{chain_rssi:.1f}", style="bright_black"),
+                            render_signal_bar_text(chain_rssi, glyph="❘"),
+                            Text(f"{chain_quality:.1f}", style="bright_black"),
+                        ])
 
-            if chain_rows:
-                chain_table = Table(
-                    show_header=True,
-                    header_style="cyan",
-                    expand=True,
-                    box=None,
-                    padding=(0, 1),
-                )
-                chain_table.add_column("if", justify="right")
-                chain_table.add_column("freq", justify="right")
-                chain_table.add_column("ant", justify="right")
-                chain_table.add_column("pkts", justify="right")
-                chain_table.add_column("lost", justify="right")
-                chain_table.add_column("rssi", justify="right")
-                chain_table.add_column("signal", justify="center")
-                chain_table.add_column("qlt %", justify="right")
-                for row in chain_rows:
-                    chain_table.add_row(*row)
-                blocks.append(chain_table)
+                if chain_rows:
+                    chain_table = Table(
+                        show_header=True,
+                        header_style="cyan",
+                        expand=True,
+                        box=None,
+                        padding=(0, 1),
+                    )
+                    chain_table.add_column("if", justify="right")
+                    chain_table.add_column("freq", justify="right")
+                    chain_table.add_column("ant", justify="right")
+                    chain_table.add_column("pkts", justify="right")
+                    chain_table.add_column("lost", justify="right")
+                    chain_table.add_column("rssi", justify="right")
+                    chain_table.add_column("signal", justify="center")
+                    chain_table.add_column("qlt %", justify="right")
+                    for row in chain_rows:
+                        chain_table.add_row(*row)
+                    blocks.append(chain_table)
         blocks.append(Text(""))
     else:
         blocks.append(Text("no RX tx entries", style="dim"))
@@ -723,12 +726,20 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
 @click.option("--module-id", "module_id_filter", default="", help="Substring filter for module_id")
 @click.option("--module-type", "module_type_filter", default="", help="Substring filter for module_type")
 @click.option("--host-id", "host_id_filter", default="", help="Substring filter for host_id")
+@click.option(
+    "--view-mode",
+    type=click.Choice(["summary", "full"], case_sensitive=False),
+    default="summary",
+    show_default=True,
+    help="summary: без статистики по антеннам (mx/xrx); full: показывать все детали",
+)
 def main(mcast_ip: str,
          port: int,
          idle_ms: int,
          module_id_filter: str,
          module_type_filter: str,
-         host_id_filter: str) -> None:
+         host_id_filter: str,
+         view_mode: str) -> None:
     sock: Optional[socket.socket] = None
 
     def cleanup() -> None:
@@ -755,6 +766,9 @@ def main(mcast_ip: str,
 
     total_packets = 0
     filtered_packets = 0
+
+    global VIEW_MODE
+    VIEW_MODE = view_mode.lower()
 
     with Live(render_dashboard(modules, time.time()), refresh_per_second=5, console=console) as live:
         while True:
