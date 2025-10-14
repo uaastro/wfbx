@@ -124,6 +124,7 @@ typedef struct {
 #define MX_MAX_IF_ENTRIES (MAX_TX_IDS * MAX_IFS)
 
 static inline uint16_t clamp_u16(uint32_t v) { return (uint16_t)(v > 0xFFFFu ? 0xFFFFu : v); }
+static inline uint32_t clamp_u32(uint64_t v) { return (uint32_t)(v > 0xFFFFFFFFu ? 0xFFFFFFFFu : v); }
 
 static inline uint16_t clamp_permille(int value)
 {
@@ -225,16 +226,23 @@ struct if_stats {
 };
 
 /* Per-chain accumulators per (TX,IF) */
+struct ant_port_detail {
+  uint32_t packets;
+  int have_seq;
+  uint16_t expect_seq;
+  uint32_t lost;
+};
+
 struct ant_stats {
   uint8_t ant_id;          /* radiotap ANTENNA (last seen) */
   int rssi_min;
   int rssi_max;
   int64_t rssi_sum;
   uint32_t rssi_samples;
-  /* Per-chain loss tracking (optional) */
   int have_seq;
   uint16_t expect_seq;
   uint32_t lost;
+  struct ant_port_detail ports[MAX_RADIO_PORTS];
 };
 
 /* Epoch stats container */
@@ -273,6 +281,7 @@ struct if_detail {
   uint16_t expect_seq;
   uint32_t lost;
   /* per-chain */
+  struct port_detail ports[MAX_RADIO_PORTS];
   struct ant_stats ant[RX_ANT_MAX];
   /* per-interface epoch metrics for this TX */
   struct epoch_stats es;
@@ -318,6 +327,7 @@ static void stats_reset_period(int n_if)
     for (int i=0;i<n_if;i++) {
       struct if_detail* D = &TXD[t].ifs[i];
       D->pkts = 0; D->have_seq = 0; D->expect_seq = 0; D->lost = 0;
+      memset(D->ports, 0, sizeof(D->ports));
       memset(&D->es, 0, sizeof(D->es));
       for (int c=0;c<RX_ANT_MAX;c++) {
         D->ant[c].ant_id = 0xff;
@@ -328,6 +338,7 @@ static void stats_reset_period(int n_if)
         D->ant[c].have_seq = 0;
         D->ant[c].expect_seq = 0;
         D->ant[c].lost = 0;
+        memset(D->ant[c].ports, 0, sizeof(D->ant[c].ports));
       }
     }
   }
@@ -851,6 +862,7 @@ int main(int argc, char** argv)
 
         /* Per-interface packet/radio stats + per-chain */
         DID->pkts++;
+        DID->have_seq = 1;
         for (int c=0;c<rs.chains && c<RX_ANT_MAX; ++c) {
           if (rs.rssi[c] == SCHAR_MIN) continue;
           struct ant_stats* AS = &DID->ant[c];
@@ -859,19 +871,8 @@ int main(int argc, char** argv)
           if (r > AS->rssi_max) AS->rssi_max = r;
           AS->rssi_sum += r; AS->rssi_samples++;
           AS->ant_id = rs.antenna[c];
-          /* per-chain sequence loss (update only when chain present) */
-          if (!AS->have_seq) { AS->have_seq = 1; AS->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF); }
-          else {
-            if (v.seq12 != AS->expect_seq) { uint16_t gap = (uint16_t)((v.seq12 - AS->expect_seq) & 0x0FFF); AS->lost += gap; AS->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF); }
-            else { AS->expect_seq = (uint16_t)((AS->expect_seq + 1) & 0x0FFF); }
-          }
         }
-        /* per-interface sequence loss */
-        if (!DID->have_seq) { DID->have_seq = 1; DID->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF); }
-        else {
-          if (v.seq12 != DID->expect_seq) { uint16_t gap = (uint16_t)((v.seq12 - DID->expect_seq) & 0x0FFF); DID->lost += gap; DID->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF); }
-          else { DID->expect_seq = (uint16_t)((DID->expect_seq + 1) & 0x0FFF); }
-        }
+        DID->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
 
         /* Epoch metrics for this (TX,IF) */
         if (have_ts_tx) {
@@ -994,6 +995,41 @@ int main(int argc, char** argv)
           }
           PD->unique_pkts++;
           PD->bytes += unique_len;
+          struct port_detail* PIF = &DID->ports[radio_port];
+          if (!PIF->have_seq) {
+            PIF->have_seq = 1;
+            PIF->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+          } else {
+            if (v.seq12 != PIF->expect_seq) {
+              uint16_t gap = (uint16_t)((v.seq12 - PIF->expect_seq) & 0x0FFF);
+              PIF->lost += gap;
+              DID->lost += gap;
+              PIF->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+            } else {
+              PIF->expect_seq = (uint16_t)((PIF->expect_seq + 1) & 0x0FFF);
+            }
+          }
+          PIF->unique_pkts++;
+          PIF->bytes += unique_len;
+          for (int c=0;c<rs.chains && c<RX_ANT_MAX; ++c) {
+            if (rs.rssi[c] == SCHAR_MIN) continue;
+            struct ant_stats* AS = &DID->ant[c];
+            struct ant_port_detail* AP = &AS->ports[radio_port];
+            AP->packets++;
+            if (!AP->have_seq) {
+              AP->have_seq = 1;
+              AP->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+            } else {
+              if (v.seq12 != AP->expect_seq) {
+                uint16_t gap = (uint16_t)((v.seq12 - AP->expect_seq) & 0x0FFF);
+                AP->lost += gap;
+                AS->lost += gap;
+                AP->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+              } else {
+                AP->expect_seq = (uint16_t)((AP->expect_seq + 1) & 0x0FFF);
+              }
+            }
+          }
           TXD[tx_id].unique_pkts++;
           TXD[tx_id].bytes += unique_len;
           if (have_ts_tx) {
@@ -1140,17 +1176,23 @@ stats_tick:
           uint8_t iface_counter = 0;
           for (int i2 = 0; i2 < n_open; ++i2) {
             struct if_detail* D = &TXD[tX].ifs[i2];
-            if (D->pkts == 0 && D->es.epoch_samples == 0 && D->lost == 0) continue;
+            uint64_t if_unique = 0;
+            uint64_t if_lost = 0;
+            for (int rp = 0; rp < MAX_RADIO_PORTS; ++rp) {
+              if_unique += D->ports[rp].unique_pkts;
+              if_lost += D->ports[rp].lost;
+            }
+            if (if_unique == 0 && if_lost == 0 && D->es.epoch_samples == 0) continue;
             if (if_entry_count >= MX_MAX_IF_ENTRIES) continue;
             mx_if_entry_t* if_entry = &if_entries[if_entry_count];
             memset(if_entry, 0, sizeof(*if_entry));
             if_entry->detail.tx_id = (uint8_t)tX;
             if_entry->detail.iface_id = (uint8_t)i2;
-            if_entry->detail.packets = D->pkts;
-            if_entry->detail.lost = D->lost;
+            if_entry->detail.packets = clamp_u32(if_unique);
+            if_entry->detail.lost = clamp_u32(if_lost);
             if_entry->detail.reserved0 = 0;
-            uint64_t exp_total = (uint64_t)D->pkts + (uint64_t)D->lost;
-            double qlt = (exp_total > 0) ? ((double)D->pkts * 1000.0 / (double)exp_total) : 1000.0;
+            uint64_t exp_total = if_unique + if_lost;
+            double qlt = (exp_total > 0) ? ((double)if_unique * 1000.0 / (double)exp_total) : 1000.0;
             if_entry->detail.quality_permille = clamp_permille((int)lrint(qlt));
             if_entry->detail.freq_mhz = (uint16_t)(iface_freq_mhz[i2]);
             if_entry->detail.reserved1 = 0;
@@ -1165,21 +1207,26 @@ stats_tick:
             if_entry->detail.best_chain_rssi_q8 = to_q8((double)best_chain_avg_if);
             for (int c = 0; c < RX_ANT_MAX; ++c) {
               struct ant_stats* AS = &D->ant[c];
-              uint32_t lost_ch = AS->lost;
-              if (AS->rssi_samples == 0 && lost_ch == 0) continue;
+              uint64_t packets_ch = 0;
+              uint64_t lost_ch = 0;
+              for (int rp = 0; rp < MAX_RADIO_PORTS; ++rp) {
+                packets_ch += AS->ports[rp].packets;
+                lost_ch += AS->ports[rp].lost;
+              }
+              if (packets_ch == 0 && lost_ch == 0) continue;
               if (if_entry->detail.chain_count >= RX_ANT_MAX) continue;
               wfbx_mx_chain_detail_t* chain = &if_entry->chains[if_entry->detail.chain_count];
               chain->chain_id = (uint8_t)c;
               chain->ant_id = (uint8_t)AS->ant_id;
-              uint32_t exp_chain = (uint32_t)AS->rssi_samples + lost_ch;
-              double q_chain = (exp_chain > 0) ? ((double)AS->rssi_samples * 1000.0 / (double)exp_chain) : 1000.0;
+              uint64_t exp_chain = packets_ch + lost_ch;
+              double q_chain = (exp_chain > 0) ? ((double)packets_ch * 1000.0 / (double)exp_chain) : 1000.0;
               chain->quality_permille = clamp_permille((int)lrint(q_chain));
               double rssi_avg = (AS->rssi_samples > 0) ? ((double)AS->rssi_sum / (double)AS->rssi_samples) : 0.0;
               chain->rssi_min_q8 = to_q8((double)AS->rssi_min);
               chain->rssi_avg_q8 = to_q8(rssi_avg);
               chain->rssi_max_q8 = to_q8((double)AS->rssi_max);
-              chain->packets = clamp_u16(AS->rssi_samples);
-              chain->lost = clamp_u16(lost_ch);
+              chain->packets = clamp_u16((packets_ch > 0xFFFFu) ? 0xFFFFu : (uint32_t)packets_ch);
+              chain->lost = clamp_u16((lost_ch > 0xFFFFu) ? 0xFFFFu : (uint32_t)lost_ch);
               if_entry->detail.chain_count++;
             }
             if (if_entry->detail.chain_count > 0 || if_entry->detail.packets > 0 || if_entry->detail.lost > 0) {
@@ -1255,9 +1302,15 @@ stats_tick:
           /* Then per-interface detail for this TX */
           for (int i2=0;i2<n_open;i2++) {
             struct if_detail* D = &TXD[tX].ifs[i2];
-            if (D->pkts==0 && D->es.epoch_samples==0) continue;
-            uint64_t exp_total = (uint64_t)D->pkts + (uint64_t)D->lost;
-            double qlt = (exp_total>0) ? (100.0 * (double)D->pkts / (double)exp_total) : 0.0;
+            uint64_t if_unique = 0;
+            uint64_t if_lost = 0;
+            for (int rp = 0; rp < MAX_RADIO_PORTS; ++rp) {
+              if_unique += D->ports[rp].unique_pkts;
+              if_lost += D->ports[rp].lost;
+            }
+            if (if_unique==0 && if_lost==0 && D->es.epoch_samples==0) continue;
+            uint64_t exp_total = if_unique + if_lost;
+            double qlt = (exp_total>0) ? (100.0 * (double)if_unique / (double)exp_total) : 0.0;
             /* Best chain avg on this iface */
             int best_chain_avg_if = -127; int best_chain_id = -1; int best_valid=0;
             for (int c=0;c<RX_ANT_MAX;c++) {
@@ -1267,15 +1320,23 @@ stats_tick:
                 if (!best_valid || avgc > best_chain_avg_if) { best_chain_avg_if = avgc; best_chain_id = AS->ant_id; best_valid=1; }
               }
             }
-            fprintf(stderr, "\n    [IF %d] pkts=%llu lost=%u qlt=%.1f%% | bestChain=%s%d(avg %d dBm)\n",
-                    i2,(unsigned long long)D->pkts,(unsigned)D->lost,qlt,
+            fprintf(stderr, "\n    [IF %d] pkts=%llu lost=%llu qlt=%.1f%% | bestChain=%s%d(avg %d dBm)\n",
+                    i2,(unsigned long long)if_unique,(unsigned long long)if_lost,qlt,
                     (best_valid?"ANT":"n/a "), best_valid?(int)best_chain_id:0, best_valid?best_chain_avg_if:0);
             /* Per-antenna stats */
             for (int c=0;c<RX_ANT_MAX;c++) {
-              struct ant_stats* AS = &D->ant[c]; if (AS->rssi_samples==0) continue;
-              double av = (double)AS->rssi_sum / (double)AS->rssi_samples;
-              fprintf(stderr, "      ANTa%02d: rssi min=%d avg=%.1f max=%d | lost=%u\n",
-                      (int)AS->ant_id,(int)AS->rssi_min,av,(int)AS->rssi_max,(unsigned)AS->lost);
+              struct ant_stats* AS = &D->ant[c];
+              uint64_t packets_ch = 0;
+              uint64_t lost_ch = 0;
+              for (int rp = 0; rp < MAX_RADIO_PORTS; ++rp) {
+                packets_ch += AS->ports[rp].packets;
+                lost_ch += AS->ports[rp].lost;
+              }
+              if (packets_ch==0 && lost_ch==0) continue;
+              double av = (AS->rssi_samples>0)?((double)AS->rssi_sum/(double)AS->rssi_samples):0.0;
+              fprintf(stderr, "      ANTa%02d: rssi min=%d avg=%.1f max=%d | pkts=%llu lost=%llu\n",
+                      (int)AS->ant_id,(int)AS->rssi_min,av,(int)AS->rssi_max,
+                      (unsigned long long)packets_ch,(unsigned long long)lost_ch);
             }
             if (cli.debug_stats) {
               struct epoch_stats* EI = &D->es;
