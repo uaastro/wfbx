@@ -484,7 +484,8 @@ int main(int argc, char** argv)
 
   /* Global dedup window */
   struct seq_window W; seqwin_init(&W);
-
+  int fatal_iface_error = 0;
+  
   while (g_run) {
     uint64_t now = now_ms();
     uint64_t ms_left = (t0 + (uint64_t)cli.stat_period_ms > now) ? (t0 + (uint64_t)cli.stat_period_ms - now) : 0;
