@@ -858,7 +858,6 @@ int main(int argc, char** argv)
 
         /* Identify TX/IF */
         struct if_detail* DID = &TXD[tx_id].ifs[i];
-        struct port_detail* PD = &TXD[tx_id].ports[radio_port];
 
         /* Per-interface packet/radio stats + per-chain */
         DID->pkts++;
