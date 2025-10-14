@@ -969,6 +969,57 @@ int main(int argc, char** argv)
 
         /* Per-TX global dedup for unique pkt + earliest-arrival epoch accumulation */
         int dup_port = seqwin_check_set(&SWG[tx_id][radio_port], v.seq12);
+        size_t unique_len = v.payload_len;
+        if (trailer_found > 0 && unique_len >= trailer_found) unique_len -= trailer_found;
+
+        /* Per-interface per-port tracking: allow each iface to account for quality independently */
+        struct port_detail* PIF = &DID->ports[radio_port];
+        int count_if_pkt = 1;
+        if (!PIF->have_seq) {
+          PIF->have_seq = 1;
+          PIF->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+        } else {
+          uint16_t diff = (uint16_t)((v.seq12 - PIF->expect_seq) & 0x0FFF);
+          if (diff == 0) {
+            PIF->expect_seq = (uint16_t)((PIF->expect_seq + 1) & 0x0FFF);
+          } else if (diff & 0x0800) {
+            count_if_pkt = 0; /* old/duplicate frame for this iface */
+          } else {
+            PIF->lost += diff;
+            DID->lost += diff;
+            PIF->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+          }
+        }
+        if (count_if_pkt) {
+          PIF->unique_pkts++;
+          PIF->bytes += unique_len;
+        }
+
+        for (int c = 0; c < rs.chains && c < RX_ANT_MAX; ++c) {
+          if (rs.rssi[c] == SCHAR_MIN) continue;
+          struct ant_stats* AS = &DID->ant[c];
+          struct ant_port_detail* AP = &AS->ports[radio_port];
+          int count_chain_pkt = 1;
+          if (!AP->have_seq) {
+            AP->have_seq = 1;
+            AP->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+          } else {
+            uint16_t diff = (uint16_t)((v.seq12 - AP->expect_seq) & 0x0FFF);
+            if (diff == 0) {
+              AP->expect_seq = (uint16_t)((AP->expect_seq + 1) & 0x0FFF);
+            } else if (diff & 0x0800) {
+              count_chain_pkt = 0;
+            } else {
+              AP->lost += diff;
+              AS->lost += diff;
+              AP->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+            }
+          }
+          if (count_chain_pkt) {
+            AP->packets++;
+          }
+        }
+
         if (!dup_port) {
           /* Per-TX lightweight RSSI (best-chain over iface bests): use per-packet best over present chains */
           int pkt_best = -127; int have_pkt_best = 0;
@@ -979,8 +1030,7 @@ int main(int argc, char** argv)
             if (pkt_best > TX[tx_id].rssi_max) TX[tx_id].rssi_max = pkt_best;
             TX[tx_id].rssi_sum += pkt_best; TX[tx_id].rssi_samples++;
           }
-          size_t unique_len = v.payload_len;
-          if (trailer_found > 0 && unique_len >= trailer_found) unique_len -= trailer_found;
+          struct port_detail* PD = &TXD[tx_id].ports[radio_port];
           if (!PD->have_seq) {
             PD->have_seq = 1;
             PD->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
@@ -995,41 +1045,6 @@ int main(int argc, char** argv)
           }
           PD->unique_pkts++;
           PD->bytes += unique_len;
-          struct port_detail* PIF = &DID->ports[radio_port];
-          if (!PIF->have_seq) {
-            PIF->have_seq = 1;
-            PIF->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
-          } else {
-            if (v.seq12 != PIF->expect_seq) {
-              uint16_t gap = (uint16_t)((v.seq12 - PIF->expect_seq) & 0x0FFF);
-              PIF->lost += gap;
-              DID->lost += gap;
-              PIF->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
-            } else {
-              PIF->expect_seq = (uint16_t)((PIF->expect_seq + 1) & 0x0FFF);
-            }
-          }
-          PIF->unique_pkts++;
-          PIF->bytes += unique_len;
-          for (int c=0;c<rs.chains && c<RX_ANT_MAX; ++c) {
-            if (rs.rssi[c] == SCHAR_MIN) continue;
-            struct ant_stats* AS = &DID->ant[c];
-            struct ant_port_detail* AP = &AS->ports[radio_port];
-            AP->packets++;
-            if (!AP->have_seq) {
-              AP->have_seq = 1;
-              AP->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
-            } else {
-              if (v.seq12 != AP->expect_seq) {
-                uint16_t gap = (uint16_t)((v.seq12 - AP->expect_seq) & 0x0FFF);
-                AP->lost += gap;
-                AS->lost += gap;
-                AP->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
-              } else {
-                AP->expect_seq = (uint16_t)((AP->expect_seq + 1) & 0x0FFF);
-              }
-            }
-          }
           TXD[tx_id].unique_pkts++;
           TXD[tx_id].bytes += unique_len;
           if (have_ts_tx) {
@@ -1062,7 +1077,7 @@ int main(int argc, char** argv)
               if (!TXD[tx_id].have_cur_epoch || TXD[tx_id].cur_epoch_tx_us != epoch_tx_us) {
                 TXD[tx_id].have_cur_epoch = 1;
                 TXD[tx_id].cur_epoch_tx_us = epoch_tx_us;
-              TXD[tx_id].cur_epoch_instant_us = (uint64_t)T_epoch_instant_pkt;
+                TXD[tx_id].cur_epoch_instant_us = (uint64_t)T_epoch_instant_pkt;
               } else {
                 if ((uint64_t)T_epoch_instant_pkt < TXD[tx_id].cur_epoch_instant_us) {
                   TXD[tx_id].cur_epoch_instant_us = (uint64_t)T_epoch_instant_pkt;
