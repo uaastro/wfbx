@@ -12,9 +12,7 @@ from typing import Dict, List, Optional, Tuple
 import click
 from rich import box
 from rich.align import Align
-from rich.columns import Columns
 from rich.console import Console, Group
-from rich.constrain import Constrain
 from rich.table import Table
 import traceback
 from rich.live import Live
@@ -713,36 +711,7 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
     ordered = [modules[key] for key in sorted(modules.keys())]
     panels = [render_module(rec, now) for rec in ordered]
 
-    term_width = console.size.width if console.size else 80
-
-    if len(panels) >= 3 and term_width >= 200:
-        cols = 3
-    elif len(panels) >= 2 and term_width >= 120:
-        cols = 2
-    else:
-        cols = 1
-
-    if cols == 1:
-        layout = Group(*panels)
-    else:
-        max_width = max(20, (term_width // cols) - 4)
-        rows = []
-        empty_panel = Panel(Text(""), border_style="black")
-        for idx in range(0, len(panels), cols):
-            row_items = panels[idx:idx + cols]
-            if len(row_items) < cols:
-                row_items = row_items + [empty_panel] * (cols - len(row_items))
-            constrained = [Constrain(item, width=max_width) for item in row_items]
-            try:
-                row = Columns(constrained, expand=True, equal=True)
-            except Exception as exc:  # pragma: no cover
-                try:
-                    console.log(f"[TOP] Columns row fallback: {exc}")
-                except Exception:
-                    pass
-                row = Group(*row_items)
-            rows.append(row)
-        layout = Group(*rows)
+    layout = Group(*panels)
 
     return Panel(layout, border_style="blue", title="wfbx_top")
 

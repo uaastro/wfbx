@@ -204,6 +204,7 @@ static int seqwin_check_set(struct seq_window* w, uint16_t s)
 }
 
 #define MAX_TX_IDS 256
+#define MAX_RADIO_PORTS 256
 struct tx_stats {
   uint64_t pkts;            /* unique pkts (dedup across ifaces) */
   int rssi_min;             /* best-chain RSSI */
@@ -256,6 +257,14 @@ struct epoch_stats {
   uint64_t e_epoch_samples;
 };
 
+struct port_detail {
+  uint64_t unique_pkts;
+  uint64_t bytes;
+  int      have_seq;
+  uint16_t expect_seq;
+  uint32_t lost;
+};
+
 /* Per-interface detail within a TX */
 struct if_detail {
   uint64_t pkts;
@@ -275,10 +284,7 @@ struct tx_detail {
   uint64_t bytes;             /* deduped payload bytes (per period) */
   struct if_detail ifs[MAX_IFS];
   struct epoch_stats es_overall; /* earliest-arrival based */
-  /* Global loss across interfaces (on deduped stream) */
-  int have_seq_glob;
-  uint16_t expect_seq_glob;
-  uint32_t lost_glob;
+  struct port_detail ports[MAX_RADIO_PORTS];
   /* Modernized epoch tracking per TX: keep current epoch key and minimal T_epoch_instant_pkt */
   int      have_cur_epoch;
   uint64_t cur_epoch_tx_us;      /* epoch_tx_us key from trailer */
@@ -288,7 +294,7 @@ struct tx_detail {
 static struct tx_stats TX[MAX_TX_IDS];
 static struct if_stats IFST[MAX_IFS];
 static struct tx_detail TXD[MAX_TX_IDS];
-static struct seq_window SWG[MAX_TX_IDS];
+static struct seq_window SWG[MAX_TX_IDS][MAX_RADIO_PORTS];
 /* Control epoch send counter (per reporting period) */
 static uint64_t g_ctrl_epoch_send_period = 0;
 
@@ -305,9 +311,10 @@ static void stats_reset_period(int n_if)
     TXD[t].bytes = 0;
     /* zero per-TX epoch aggregates */
     memset(&TXD[t].es_overall, 0, sizeof(TXD[t].es_overall));
-    TXD[t].have_seq_glob = 0;
-    TXD[t].expect_seq_glob = 0;
-    TXD[t].lost_glob = 0;
+    for (int p = 0; p < MAX_RADIO_PORTS; ++p) {
+      struct port_detail* P = &TXD[t].ports[p];
+      memset(P, 0, sizeof(*P));
+    }
     for (int i=0;i<n_if;i++) {
       struct if_detail* D = &TXD[t].ifs[i];
       D->pkts = 0; D->have_seq = 0; D->expect_seq = 0; D->lost = 0;
@@ -712,7 +719,11 @@ int main(int argc, char** argv)
   uint64_t pkts = 0;
   uint64_t bytes_forwarded = 0;
   /* Init dedup windows per TX and reset per-period stats */
-  for (int t=0;t<MAX_TX_IDS;++t) seqwin_init(&SWG[t]);
+  for (int t=0;t<MAX_TX_IDS;++t) {
+    for (int p=0;p<MAX_RADIO_PORTS;++p) {
+      seqwin_init(&SWG[t][p]);
+    }
+  }
   stats_reset_period(n_open);
   /* Real delta_us statistics */
   int64_t real_delta_sum = 0;
@@ -805,6 +816,7 @@ int main(int argc, char** argv)
         /* TX-ID filter: use addr2[5] */
         uint8_t tx_id = v.h ? v.h->addr2[5] : 0;
         uint8_t group_id = v.h ? v.h->addr1[5] : 0;
+        uint8_t radio_port = v.h ? v.h->addr3[5] : 0;
         if (!txf_match(&cli.txf, tx_id)) continue;
         if (cli.group_id >= 0 && group_id != (uint8_t)cli.group_id) continue;
 
@@ -835,6 +847,7 @@ int main(int argc, char** argv)
 
         /* Identify TX/IF */
         struct if_detail* DID = &TXD[tx_id].ifs[i];
+        struct port_detail* PD = &TXD[tx_id].ports[radio_port];
 
         /* Per-interface packet/radio stats + per-chain */
         DID->pkts++;
@@ -954,8 +967,8 @@ int main(int argc, char** argv)
         }
 
         /* Per-TX global dedup for unique pkt + earliest-arrival epoch accumulation */
-        int dup_global = seqwin_check_set(&SWG[tx_id], v.seq12);
-        if (!dup_global) {
+        int dup_port = seqwin_check_set(&SWG[tx_id][radio_port], v.seq12);
+        if (!dup_port) {
           /* Per-TX lightweight RSSI (best-chain over iface bests): use per-packet best over present chains */
           int pkt_best = -127; int have_pkt_best = 0;
           for (int c=0;c<rs.chains && c<RX_ANT_MAX; ++c) if (rs.rssi[c] != SCHAR_MIN) { if (!have_pkt_best || rs.rssi[c] > pkt_best) { pkt_best = rs.rssi[c]; have_pkt_best = 1; } }
@@ -965,23 +978,24 @@ int main(int argc, char** argv)
             if (pkt_best > TX[tx_id].rssi_max) TX[tx_id].rssi_max = pkt_best;
             TX[tx_id].rssi_sum += pkt_best; TX[tx_id].rssi_samples++;
           }
-          TXD[tx_id].unique_pkts++;
           size_t unique_len = v.payload_len;
           if (trailer_found > 0 && unique_len >= trailer_found) unique_len -= trailer_found;
-          TXD[tx_id].bytes += unique_len;
-          /* Global (deduped) loss tracking for TX */
-          if (!TXD[tx_id].have_seq_glob) {
-            TXD[tx_id].have_seq_glob = 1;
-            TXD[tx_id].expect_seq_glob = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+          if (!PD->have_seq) {
+            PD->have_seq = 1;
+            PD->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
           } else {
-            if (v.seq12 != TXD[tx_id].expect_seq_glob) {
-              uint16_t gap = (uint16_t)((v.seq12 - TXD[tx_id].expect_seq_glob) & 0x0FFF);
-              TXD[tx_id].lost_glob += gap;
-              TXD[tx_id].expect_seq_glob = (uint16_t)((v.seq12 + 1) & 0x0FFF);
+            if (v.seq12 != PD->expect_seq) {
+              uint16_t gap = (uint16_t)((v.seq12 - PD->expect_seq) & 0x0FFF);
+              PD->lost += gap;
+              PD->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
             } else {
-              TXD[tx_id].expect_seq_glob = (uint16_t)((TXD[tx_id].expect_seq_glob + 1) & 0x0FFF);
+              PD->expect_seq = (uint16_t)((PD->expect_seq + 1) & 0x0FFF);
             }
           }
+          PD->unique_pkts++;
+          PD->bytes += unique_len;
+          TXD[tx_id].unique_pkts++;
+          TXD[tx_id].bytes += unique_len;
           if (have_ts_tx) {
             int64_t inst = (int64_t)t_loc_us - (int64_t)cli.delta_us - (int64_t)A_us - (int64_t)cli.tau_us - (int64_t)TS_tx_us;
             uint64_t T_epoch_instant_pkt = (inst < 0) ? 0ull : (uint64_t)inst;
@@ -1085,12 +1099,18 @@ stats_tick:
           mx_tx_entry_t* tx_entry = &tx_entries[tx_entry_count];
           memset(tx_entry, 0, sizeof(*tx_entry));
           tx_entry->summary.tx_id = (uint8_t)tX;
-          uint32_t packets_unique = (uint32_t)TXD[tX].unique_pkts;
-          uint32_t lost_glob = (uint32_t)TXD[tX].lost_glob;
+          uint64_t unique_total = 0;
+          uint64_t lost_total = 0;
+          for (int rp = 0; rp < MAX_RADIO_PORTS; ++rp) {
+            unique_total += TXD[tX].ports[rp].unique_pkts;
+            lost_total += TXD[tX].ports[rp].lost;
+          }
+          uint32_t packets_unique = (unique_total > UINT32_MAX) ? UINT32_MAX : (uint32_t)unique_total;
+          uint32_t lost_clamped = (lost_total > UINT32_MAX) ? UINT32_MAX : (uint32_t)lost_total;
           tx_entry->summary.packets = packets_unique;
-          tx_entry->summary.lost = lost_glob;
-          uint64_t exp_tx_total = (uint64_t)packets_unique + (uint64_t)lost_glob;
-          double qlt_tx = (exp_tx_total > 0) ? ((double)packets_unique * 1000.0 / (double)exp_tx_total) : 1000.0;
+          tx_entry->summary.lost = lost_clamped;
+          uint64_t exp_tx_total = unique_total + lost_total;
+          double qlt_tx = (exp_tx_total > 0) ? ((double)unique_total * 1000.0 / (double)exp_tx_total) : 1000.0;
           tx_entry->summary.quality_permille = clamp_permille((int)lrint(qlt_tx));
           double rate_kbps = 0.0;
           if (cli.stat_period_ms > 0) {
@@ -1212,11 +1232,17 @@ stats_tick:
               }
             }
           }
-          /* TX-level QLT: based on deduped stream: unique / (unique + lost_glob) */
-          uint64_t exp_tx_total = TXD[tX].unique_pkts + (uint64_t)TXD[tX].lost_glob;
-          double qlt_tx = (exp_tx_total>0) ? (100.0 * (double)TXD[tX].unique_pkts / (double)exp_tx_total) : 0.0;
-          fprintf(stderr, "\n  [TX %03d] upkts=%llu lost=%u qlt=%.1f%% | RSSI min=%d avg=%.1f max=%d\n",
-                  tX,(unsigned long long)TXD[tX].unique_pkts,(unsigned)TXD[tX].lost_glob,qlt_tx,
+          uint64_t unique_total = 0;
+          uint64_t lost_total = 0;
+          for (int rp = 0; rp < MAX_RADIO_PORTS; ++rp) {
+            unique_total += TXD[tX].ports[rp].unique_pkts;
+            lost_total += TXD[tX].ports[rp].lost;
+          }
+          /* TX-level QLT: based on deduped stream: unique / (unique + lost_total) */
+          uint64_t exp_tx_total = unique_total + lost_total;
+          double qlt_tx = (exp_tx_total>0) ? (100.0 * (double)unique_total / (double)exp_tx_total) : 0.0;
+          fprintf(stderr, "\n  [TX %03d] upkts=%llu lost=%llu qlt=%.1f%% | RSSI min=%d avg=%.1f max=%d\n",
+                  tX,(unsigned long long)unique_total,(unsigned long long)lost_total,qlt_tx,
                   (int)TX[tX].rssi_min,avg_tx_rssi,(int)TX[tX].rssi_max);
           if (cli.debug_stats) {
             struct epoch_stats* ES = &TXD[tX].es_overall;
