@@ -780,27 +780,31 @@ int main(int argc, char** argv)
         int dup_global = seqwin_check_set(&SW[tx_id], v.seq12);
         const int should_forward = !dup_global; /* forward only once across all ifaces */
         if (should_forward) {
-          /* Payload bytes minus the mesh trailer (reflect UDP payload rate). */
-          size_t eff_len = v.payload_len;
-          if (eff_len >= trailer_bytes) eff_len -= trailer_bytes;
-          bytes_tx[tx_id] += (uint64_t)eff_len;
-          pkts_tx[tx_id]  += 1;
-          /* Mark that at least one valid packet has been seen globally. */
-          g_any_packets_seen = 1;
-        /* Per-TX loss tracking: count gaps within each tx_id sequence space. */
+          uint16_t diff = 0;
+          int count_global_pkt = 1;
           if (!G[tx_id].have_seq) {
             G[tx_id].have_seq = 1;
             G[tx_id].expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
           } else {
-            if (v.seq12 != G[tx_id].expect_seq) {
-              uint16_t gap = (uint16_t)((v.seq12 - G[tx_id].expect_seq) & 0x0FFF);
-              G[tx_id].lost += gap;  /* accumulate loss for this tx_id in current period */
-              G[tx_id].expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
-            } else {
+            diff = (uint16_t)((v.seq12 - G[tx_id].expect_seq) & 0x0FFF);
+            if (diff == 0) {
               G[tx_id].expect_seq = (uint16_t)((G[tx_id].expect_seq + 1) & 0x0FFF);
+            } else if (diff & 0x0800) {
+              count_global_pkt = 0; /* stale frame, skip */
+            } else {
+              G[tx_id].lost += diff;
+              G[tx_id].expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
             }
-          }        
-
+          }
+          if (count_global_pkt) {
+            /* Payload bytes minus the mesh trailer (reflect UDP payload rate). */
+            size_t eff_len = v.payload_len;
+            if (eff_len >= trailer_bytes) eff_len -= trailer_bytes;
+            bytes_tx[tx_id] += (uint64_t)eff_len;
+            pkts_tx[tx_id]  += 1;
+            /* Mark that at least one valid packet has been seen globally. */
+            g_any_packets_seen = 1;
+          }
         }
 
         /* Per-IFACE dedup window so that statistics are updated independently for each interface. */
