@@ -1020,66 +1020,76 @@ int main(int argc, char** argv)
         }
 
         if (!dup_port) {
-          /* Per-TX lightweight RSSI (best-chain over iface bests): use per-packet best over present chains */
-          int pkt_best = -127; int have_pkt_best = 0;
-          for (int c=0;c<rs.chains && c<RX_ANT_MAX; ++c) if (rs.rssi[c] != SCHAR_MIN) { if (!have_pkt_best || rs.rssi[c] > pkt_best) { pkt_best = rs.rssi[c]; have_pkt_best = 1; } }
-          TX[tx_id].pkts++;
-          if (have_pkt_best) {
-            if (pkt_best < TX[tx_id].rssi_min) TX[tx_id].rssi_min = pkt_best;
-            if (pkt_best > TX[tx_id].rssi_max) TX[tx_id].rssi_max = pkt_best;
-            TX[tx_id].rssi_sum += pkt_best; TX[tx_id].rssi_samples++;
-          }
           struct port_detail* PD = &TXD[tx_id].ports[radio_port];
+          int count_tx_pkt = 1;
           if (!PD->have_seq) {
             PD->have_seq = 1;
             PD->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
           } else {
-            if (v.seq12 != PD->expect_seq) {
-              uint16_t gap = (uint16_t)((v.seq12 - PD->expect_seq) & 0x0FFF);
-              PD->lost += gap;
-              PD->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
-            } else {
+            uint16_t diff = (uint16_t)((v.seq12 - PD->expect_seq) & 0x0FFF);
+            if (diff == 0) {
               PD->expect_seq = (uint16_t)((PD->expect_seq + 1) & 0x0FFF);
+            } else if (diff & 0x0800) {
+              count_tx_pkt = 0; /* stale frame outside dedup window */
+            } else {
+              PD->lost += diff;
+              PD->expect_seq = (uint16_t)((v.seq12 + 1) & 0x0FFF);
             }
           }
-          PD->unique_pkts++;
-          PD->bytes += unique_len;
-          TXD[tx_id].unique_pkts++;
-          TXD[tx_id].bytes += unique_len;
-          if (have_ts_tx) {
-            int64_t inst = (int64_t)t_loc_us - (int64_t)cli.delta_us - (int64_t)A_us - (int64_t)cli.tau_us - (int64_t)TS_tx_us;
-            uint64_t T_epoch_instant_pkt = (inst < 0) ? 0ull : (uint64_t)inst;
-            int64_t real_du = (t_send_tx_us != 0) ? ((int64_t)t_loc_us - (int64_t)A_us - (int64_t)t_send_tx_us) : 0;
-            int64_t e_d = (int64_t)cli.delta_us - real_du;
-            int64_t e_e = (have_epoch_tx) ? ((int64_t)T_epoch_instant_pkt - (int64_t)epoch_tx_us) : 0;
-            struct epoch_stats* ES = &TXD[tx_id].es_overall;
-            if (ES->epoch_samples == 0) { ES->epoch_min = T_epoch_instant_pkt; ES->epoch_max = T_epoch_instant_pkt; }
-            if (T_epoch_instant_pkt < ES->epoch_min) ES->epoch_min = T_epoch_instant_pkt;
-            if (T_epoch_instant_pkt > ES->epoch_max) ES->epoch_max = T_epoch_instant_pkt;
-            ES->epoch_sum += T_epoch_instant_pkt; ES->epoch_samples++;
-            if (t_send_tx_us != 0) {
-              if (ES->real_delta_samples == 0) { ES->real_delta_min = real_du; ES->real_delta_max = real_du; }
-              if (real_du < ES->real_delta_min) ES->real_delta_min = real_du;
-              if (real_du > ES->real_delta_max) ES->real_delta_max = real_du;
-              ES->real_delta_sum += real_du; ES->real_delta_samples++;
-              if (ES->e_delta_samples == 0) { ES->e_delta_min = e_d; ES->e_delta_max = e_d; }
-              if (e_d < ES->e_delta_min) ES->e_delta_min = e_d;
-              if (e_d > ES->e_delta_max) ES->e_delta_max = e_d;
-              ES->e_delta_sum += e_d; ES->e_delta_samples++;
+          if (count_tx_pkt) {
+            int pkt_best = -127; int have_pkt_best = 0;
+            for (int c=0;c<rs.chains && c<RX_ANT_MAX; ++c) {
+              if (rs.rssi[c] == SCHAR_MIN) continue;
+              if (!have_pkt_best || rs.rssi[c] > pkt_best) {
+                pkt_best = rs.rssi[c];
+                have_pkt_best = 1;
+              }
             }
-            if (have_epoch_tx) {
-              if (ES->e_epoch_samples == 0) { ES->e_epoch_min = e_e; ES->e_epoch_max = e_e; }
-              if (e_e < ES->e_epoch_min) ES->e_epoch_min = e_e;
-              if (e_e > ES->e_epoch_max) ES->e_epoch_max = e_e;
-              ES->e_epoch_sum += e_e; ES->e_epoch_samples++;
-              /* Also refine per-TX minimal epoch across ifaces for this epoch key */
-              if (!TXD[tx_id].have_cur_epoch || TXD[tx_id].cur_epoch_tx_us != epoch_tx_us) {
-                TXD[tx_id].have_cur_epoch = 1;
-                TXD[tx_id].cur_epoch_tx_us = epoch_tx_us;
-                TXD[tx_id].cur_epoch_instant_us = (uint64_t)T_epoch_instant_pkt;
-              } else {
-                if ((uint64_t)T_epoch_instant_pkt < TXD[tx_id].cur_epoch_instant_us) {
+            TX[tx_id].pkts++;
+            if (have_pkt_best) {
+              if (pkt_best < TX[tx_id].rssi_min) TX[tx_id].rssi_min = pkt_best;
+              if (pkt_best > TX[tx_id].rssi_max) TX[tx_id].rssi_max = pkt_best;
+              TX[tx_id].rssi_sum += pkt_best; TX[tx_id].rssi_samples++;
+            }
+            PD->unique_pkts++;
+            PD->bytes += unique_len;
+            TXD[tx_id].unique_pkts++;
+            TXD[tx_id].bytes += unique_len;
+            if (have_ts_tx) {
+              int64_t inst = (int64_t)t_loc_us - (int64_t)cli.delta_us - (int64_t)A_us - (int64_t)cli.tau_us - (int64_t)TS_tx_us;
+              uint64_t T_epoch_instant_pkt = (inst < 0) ? 0ull : (uint64_t)inst;
+              int64_t real_du = (t_send_tx_us != 0) ? ((int64_t)t_loc_us - (int64_t)A_us - (int64_t)t_send_tx_us) : 0;
+              int64_t e_d = (int64_t)cli.delta_us - real_du;
+              int64_t e_e = (have_epoch_tx) ? ((int64_t)T_epoch_instant_pkt - (int64_t)epoch_tx_us) : 0;
+              struct epoch_stats* ES = &TXD[tx_id].es_overall;
+              if (ES->epoch_samples == 0) { ES->epoch_min = T_epoch_instant_pkt; ES->epoch_max = T_epoch_instant_pkt; }
+              if (T_epoch_instant_pkt < ES->epoch_min) ES->epoch_min = T_epoch_instant_pkt;
+              if (T_epoch_instant_pkt > ES->epoch_max) ES->epoch_max = T_epoch_instant_pkt;
+              ES->epoch_sum += T_epoch_instant_pkt; ES->epoch_samples++;
+              if (t_send_tx_us != 0) {
+                if (ES->real_delta_samples == 0) { ES->real_delta_min = real_du; ES->real_delta_max = real_du; }
+                if (real_du < ES->real_delta_min) ES->real_delta_min = real_du;
+                if (real_du > ES->real_delta_max) ES->real_delta_max = real_du;
+                ES->real_delta_sum += real_du; ES->real_delta_samples++;
+                if (ES->e_delta_samples == 0) { ES->e_delta_min = e_d; ES->e_delta_max = e_d; }
+                if (e_d < ES->e_delta_min) ES->e_delta_min = e_d;
+                if (e_d > ES->e_delta_max) ES->e_delta_max = e_d;
+                ES->e_delta_sum += e_d; ES->e_delta_samples++;
+              }
+              if (have_epoch_tx) {
+                if (ES->e_epoch_samples == 0) { ES->e_epoch_min = e_e; ES->e_epoch_max = e_e; }
+                if (e_e < ES->e_epoch_min) ES->e_epoch_min = e_e;
+                if (e_e > ES->e_epoch_max) ES->e_epoch_max = e_e;
+                ES->e_epoch_sum += e_e; ES->e_epoch_samples++;
+                /* Also refine per-TX minimal epoch across ifaces for this epoch key */
+                if (!TXD[tx_id].have_cur_epoch || TXD[tx_id].cur_epoch_tx_us != epoch_tx_us) {
+                  TXD[tx_id].have_cur_epoch = 1;
+                  TXD[tx_id].cur_epoch_tx_us = epoch_tx_us;
                   TXD[tx_id].cur_epoch_instant_us = (uint64_t)T_epoch_instant_pkt;
+                } else {
+                  if ((uint64_t)T_epoch_instant_pkt < TXD[tx_id].cur_epoch_instant_us) {
+                    TXD[tx_id].cur_epoch_instant_us = (uint64_t)T_epoch_instant_pkt;
+                  }
                 }
               }
             }
