@@ -1,0 +1,240 @@
+#!/usr/bin/python3
+
+import atexit
+import selectors
+import signal
+import socket
+import struct
+import sys
+from typing import Iterable, List, Optional, Sequence, Set, Tuple
+
+import click
+
+from wfbxlib.stats import core as stats_core
+
+
+def parse_host_port(addr: str) -> Tuple[str, int]:
+    try:
+        host, port = addr.rsplit(":", 1)
+    except ValueError as exc:
+        raise click.BadParameter(f"invalid host:port '{addr}'") from exc
+    try:
+        return host, int(port)
+    except ValueError as exc:
+        raise click.BadParameter(f"invalid port in '{addr}'") from exc
+
+
+def make_mcast_receiver(mcast_addr: str, iface: Optional[str] = None) -> socket.socket:
+    group_host, group_port = parse_host_port(mcast_addr)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except OSError:
+            pass
+
+    bind_host = "0.0.0.0"
+    sock.bind((bind_host, group_port))
+
+    if iface is None:
+        iface = "0.0.0.0"
+    try:
+        mreq = struct.pack("=4s4s", socket.inet_aton(group_host), socket.inet_aton(iface))
+    except OSError as exc:
+        raise click.BadParameter(f"invalid multicast/group address or iface: {exc}") from exc
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    sock.setblocking(False)
+    return sock
+
+
+def make_unicast_sender() -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setblocking(False)
+    return sock
+
+
+def format_list(values: Iterable[str]) -> str:
+    return ", ".join(sorted(values)) if values else "any"
+
+
+def expand_values(values: Sequence[str]) -> List[str]:
+    expanded: List[str] = []
+    for value in values:
+        for part in value.split(","):
+            item = part.strip()
+            if item:
+                expanded.append(item)
+    return expanded
+
+
+def coerce_module_types(values: Sequence[str]) -> Set[stats_core.ModuleType]:
+    expanded = expand_values(values)
+    if not expanded:
+        return set()
+
+    if any(value.lower() == "any" for value in expanded):
+        if len(expanded) > 1:
+            raise click.BadParameter("cannot mix 'any' with explicit module types")
+        return set()
+
+    result: Set[stats_core.ModuleType] = set()
+    for value in expanded:
+        try:
+            numeric = int(value)
+            result.add(stats_core.ModuleType(numeric))
+            continue
+        except ValueError:
+            pass
+        try:
+            result.add(stats_core.ModuleType[value.upper()])
+        except KeyError as exc:
+            valid = ", ".join(mt.name for mt in stats_core.ModuleType)
+            raise click.BadParameter(f"unknown module type '{value}', valid: {valid}") from exc
+    return result
+
+
+def coerce_string_filter(values: Sequence[str]) -> Set[str]:
+    expanded = expand_values(values)
+    if not expanded:
+        return set()
+    if any(value.lower() == "any" for value in expanded):
+        if len(expanded) > 1:
+            raise click.BadParameter("cannot mix 'any' with explicit values")
+        return set()
+    return {value for value in expanded if value}
+
+
+def should_forward(
+    header: stats_core.Header,
+    module_types: Set[stats_core.ModuleType],
+    module_ids: Set[str],
+    host_ids: Set[str],
+) -> bool:
+    if module_types and header.module_type not in module_types:
+        return False
+    if module_ids and header.module_id not in module_ids:
+        return False
+    if host_ids and header.host_id not in host_ids:
+        return False
+    return True
+
+
+def log_block(*messages: str) -> None:
+    print("#--- STATD_FWD ---")
+    for msg in messages:
+        print(msg)
+    print("#--- /STATD_FWD ---")
+    sys.stdout.flush()
+
+
+@click.command()
+@click.option("--mcast", default="239.255.0.1:9100", show_default=True, help="Multicast source address (ip:port)")
+@click.option("--iface", default=None, help="Interface IP for multicast membership (default: 0.0.0.0)")
+@click.option("--dst", required=True, help="Unicast destination (ip:port)")
+@click.option(
+    "--module-type",
+    "module_types",
+    multiple=True,
+    help="Module type filter (name or value); repeatable; 'any' to disable filtering",
+)
+@click.option(
+    "--module-id",
+    "module_ids",
+    multiple=True,
+    help="Module ID filter; repeatable; 'any' to disable filtering",
+)
+@click.option(
+    "--host-id",
+    "host_ids",
+    multiple=True,
+    help="Host ID filter; repeatable; 'any' to disable filtering",
+)
+def main(
+    mcast: str,
+    iface: Optional[str],
+    dst: str,
+    module_types: Sequence[str],
+    module_ids: Sequence[str],
+    host_ids: Sequence[str],
+) -> None:
+    rx: Optional[socket.socket] = None
+    tx: Optional[socket.socket] = None
+
+    def cleanup() -> None:
+        for sock in (rx, tx):
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+    def handle_signal(_sig, _frame) -> None:
+        cleanup()
+        sys.exit(0)
+
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    dst_host, dst_port = parse_host_port(dst)
+    module_type_filter = coerce_module_types(module_types)
+    module_id_filter = coerce_string_filter(module_ids)
+    host_id_filter = coerce_string_filter(host_ids)
+
+    log_block(
+        f"[STATD_FWD] subscribing to mcast {mcast} (iface={iface or '0.0.0.0'})",
+        f"[STATD_FWD] forwarding to {dst_host}:{dst_port}",
+        f"[STATD_FWD] module-type filter: {format_list(mt.name for mt in module_type_filter)}",
+        f"[STATD_FWD] module-id filter: {format_list(module_id_filter)}",
+        f"[STATD_FWD] host-id filter: {format_list(host_id_filter)}",
+    )
+
+    rx = make_mcast_receiver(mcast, iface)
+    tx = make_unicast_sender()
+    dst_addr = (dst_host, dst_port)
+
+    selector = selectors.DefaultSelector()
+    selector.register(rx, selectors.EVENT_READ)
+
+    while True:
+        events = selector.select(timeout=0.25)
+        if not events:
+            continue
+        for key, _mask in events:
+            if key.fileobj is not rx:
+                continue
+            while True:
+                try:
+                    datagram, _peer = rx.recvfrom(65535)
+                except BlockingIOError:
+                    break
+                except OSError as exc:
+                    log_block(f"[STATD_FWD] recvfrom error: {exc}")
+                    break
+
+                if not datagram:
+                    continue
+
+                try:
+                    header, _sections = stats_core.decode_packet(datagram, verify_crc=False)
+                except Exception as exc:
+                    log_block(f"[STATD_FWD] dropped malformed packet: {exc}")
+                    continue
+
+                if not should_forward(header, module_type_filter, module_id_filter, host_id_filter):
+                    continue
+
+                try:
+                    tx.sendto(datagram, dst_addr)
+                except OSError as exc:
+                    log_block(f"[STATD_FWD] sendto error: {exc}")
+                else:
+                    log_block(
+                        f"[STATD_FWD] forwarded packet len={len(datagram)} "
+                        f"(module={header.module_type.name}, id={header.module_id}, host={header.host_id})"
+                    )
+
+
+if __name__ == "__main__":
+    main()
