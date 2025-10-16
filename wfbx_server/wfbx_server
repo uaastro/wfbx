@@ -566,8 +566,6 @@ def main(conf):
                         "--module-type", options['stfw_module_type'],
                         "--module-id", options['stfw_module_id'],
                         "--host-id", options['stfw_host_id']]
-                if options.get('stfw_iface', '').strip():
-                    argv.extend(["--iface", options['stfw_iface']])
 
                 kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))

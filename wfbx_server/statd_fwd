@@ -24,7 +24,7 @@ def parse_host_port(addr: str) -> Tuple[str, int]:
         raise click.BadParameter(f"invalid port in '{addr}'") from exc
 
 
-def make_mcast_receiver(mcast_addr: str, iface: Optional[str] = None) -> socket.socket:
+def make_mcast_receiver(mcast_addr: str, iface: str = "127.0.0.1") -> socket.socket:
     group_host, group_port = parse_host_port(mcast_addr)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -37,8 +37,6 @@ def make_mcast_receiver(mcast_addr: str, iface: Optional[str] = None) -> socket.
     bind_host = "0.0.0.0"
     sock.bind((bind_host, group_port))
 
-    if iface is None:
-        iface = "0.0.0.0"
     try:
         mreq = struct.pack("=4s4s", socket.inet_aton(group_host), socket.inet_aton(iface))
     except OSError as exc:
@@ -130,7 +128,6 @@ def log_block(*messages: str) -> None:
 
 @click.command()
 @click.option("--mcast", default="239.255.0.1:9100", show_default=True, help="Multicast source address (ip:port)")
-@click.option("--iface", default=None, help="Interface IP for multicast membership (default: 0.0.0.0)")
 @click.option("--dst", required=True, help="Unicast destination (ip:port)")
 @click.option(
     "--module-type",
@@ -152,7 +149,6 @@ def log_block(*messages: str) -> None:
 )
 def main(
     mcast: str,
-    iface: Optional[str],
     dst: str,
     module_types: Sequence[str],
     module_ids: Sequence[str],
@@ -183,14 +179,14 @@ def main(
     host_id_filter = coerce_string_filter(host_ids)
 
     log_block(
-        f"[STATD_FWD] subscribing to mcast {mcast} (iface={iface or '0.0.0.0'})",
+        f"[STATD_FWD] subscribing to mcast {mcast} (iface locked to 127.0.0.1)",
         f"[STATD_FWD] forwarding to {dst_host}:{dst_port}",
         f"[STATD_FWD] module-type filter: {format_list(mt.name for mt in module_type_filter)}",
         f"[STATD_FWD] module-id filter: {format_list(module_id_filter)}",
         f"[STATD_FWD] host-id filter: {format_list(host_id_filter)}",
     )
 
-    rx = make_mcast_receiver(mcast, iface)
+    rx = make_mcast_receiver(mcast, "127.0.0.1")
     tx = make_unicast_sender()
     dst_addr = (dst_host, dst_port)
 
