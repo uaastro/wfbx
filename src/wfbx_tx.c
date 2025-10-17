@@ -243,7 +243,7 @@ static void print_help(const char* prog)
     "  --delta_us <us>       Stack latency delta [%u]\n"
     "  --d_max <km>          Max distance; adds tau guard [%.1f]\n"
     "  --eps_us <us>         Scheduler margin epsilon [%u]\n"
-    "  --send_gi <us>        Inter-send pacing guard [%u]\n"
+    "  --send_gi <pct>       Inter-send pacing guard (%% airtime) [%u%%]\n"
     "  --prewake_q <n>       Divide long sleeps into n slices [%d]\n"
     "  --prewake_min <us>    Minimum slice length (us) [%u]\n"
     "  --stat_period <ms>    Stats period in ms [%d]\n"
@@ -270,7 +270,7 @@ static void print_help(const char* prog)
     1500u,
     0.0,
     250u,
-    200u,
+    10u,
     1,
     1000u,
     1000,
@@ -299,7 +299,7 @@ static uint32_t g_delta_us      = 1500;
 static uint32_t g_tau_max_us    = 0;
 static uint32_t g_eps_us        = 250;
 static double   g_d_max_km      = 0.0; /* CLI: max distance; drives g_tau_max_us */
-static uint32_t g_send_guard_us = 200; /* pacing guard between packets (us) */
+static uint32_t g_send_guard_pct = 10; /* pacing guard between packets (% of airtime) */
 /* Pre-wake slicing to refine epoch boundaries during long sleeps */
 static int      g_prewake_quanta  = 1;     /* number of slices for long sleeps (>=1) */
 static uint32_t g_prewake_min_us  = 1000;  /* minimum sleep slice (us) */
@@ -1201,7 +1201,11 @@ static void* thr_sched(void* arg)
       g_sent_bytes_period += (uint64_t)ret;
       pthread_mutex_unlock(&g_stat_mtx);
       /* delta_us/tau_max_us are already reflected in guards and T_close; pace by airtime only */
-      t_next_send = now + (uint64_t)A_us + (uint64_t)g_send_guard_us;
+      uint64_t guard_us = 0;
+      if (g_send_guard_pct > 0 && A_us > 0) {
+        guard_us = ((uint64_t)A_us * (uint64_t)g_send_guard_pct + 99u) / 100u;
+      }
+      t_next_send = now + (uint64_t)A_us + guard_us;
     } else {
       const char* perr = g_ph ? pcap_geterr(g_ph) : NULL;
       const char* ifname = g_iface_name[0] ? g_iface_name : "iface";
@@ -1362,7 +1366,7 @@ int main(int argc, char** argv) {
       else if (strcmp(name,"delta_us")==0)    g_delta_us     = (uint32_t)atoi(val);
       else if (strcmp(name,"d_max")==0)       g_d_max_km     = atof(val);
       else if (strcmp(name,"eps_us")==0)      g_eps_us       = (uint32_t)atoi(val);
-      else if (strcmp(name,"send_gi")==0)     g_send_guard_us= (uint32_t)atoi(val);
+      else if (strcmp(name,"send_gi")==0)     { int v = atoi(val); if (v < 0) v = 0; g_send_guard_pct = (uint32_t)v; }
       else if (strcmp(name,"prewake_q")==0)   { g_prewake_quanta = atoi(val); if (g_prewake_quanta < 1) g_prewake_quanta = 1; }
       else if (strcmp(name,"prewake_min")==0) { g_prewake_min_us = (uint32_t)atoi(val); if (g_prewake_min_us < 100) g_prewake_min_us = 100; }
       else if (strcmp(name,"stat_period")==0) { int v=atoi(val); if (v>0 && v<=60000) g_stat_period_ms = v; }
