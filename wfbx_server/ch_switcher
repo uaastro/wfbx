@@ -5,9 +5,37 @@ import time
 import socket
 import sys
 import signal
+import tempfile
+import logging
 from commentedconfigparser import CommentedConfigParser
 from multiprocessing import Process
 import multiprocessing
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[CH_SWITCHER] %(asctime)s %(levelname)s %(message)s",
+)
+
+
+def _write_config_atomic(config, path):
+    directory = os.path.dirname(path) or "."
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete=False) as tmp:
+            config.write(tmp)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp_path = tmp.name
+        os.replace(tmp_path, path)
+    except Exception:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        logging.exception("Failed to update config %s", path)
+        raise
 
 def rx(exit_flag,wfb_cfg,sock,ch_id,mpkts,cmd_prfx,wlx):
         
@@ -18,17 +46,26 @@ def rx(exit_flag,wfb_cfg,sock,ch_id,mpkts,cmd_prfx,wlx):
         data, addr = sock.recvfrom(mpkts)
         line = data.decode("utf-8")
         parts = line.split(':')
-        ch = config[str(wlx)]['channel']
+        if len(parts) < 2:
+            logging.warning("Malformed message from %s: %s", addr, line)
+            continue
+        try:
+            ch = config[str(wlx)]['channel']
+        except KeyError:
+            logging.exception("Missing channel configuration for section '%s' in %s", wlx, wfb_cfg)
+            continue
         if parts[0] == str(ch_id):
             if (str(ch) == str(parts[1])) or ('def' == str(parts[1])):
                 pass
             else:
                 config[str(wlx)]['channel'] = parts[1]
-                print('conf: ',config[str(wlx)]['channel'])
-                print(wfb_cfg)
-                with open(wfb_cfg,'w') as configfile:
-                    config.write(configfile)
-                exit_flag.value = 1
+                logging.info("Updating %s channel -> %s", wlx, parts[1])
+                try:
+                    _write_config_atomic(config, wfb_cfg)
+                    exit_flag.value = 1
+                except Exception:
+                    logging.error("Failed to persist channel change, keeping previous value")
+                continue
                 #sys.exit(0)
 
 def tx(exit_flag,wfb_cfg,sock,ip_server,port_server,ch_id,hb_freq,cmd_prfx,wlan):
@@ -47,7 +84,7 @@ def tx(exit_flag,wfb_cfg,sock,ip_server,port_server,ch_id,hb_freq,cmd_prfx,wlan)
 @click.option('--ip_server', default="127.0.0.1", help='channel switcher server def 127.0.0.1')
 @click.option('--port_server', default=14410, help='channel switcher server def 14410')
 @click.option('--ch_id', default=100, help='channel_id def 100')
-@click.option('--hb_freq', default=1, help='heart bit frequency def 20 hb/sec')
+@click.option('--hb_freq', default=1, help='heartbeat frequency in Hz (def: 1)')
 @click.option('--mpkts', default=2048, help='max udp packet size def 2048')
 @click.option('--cmd_prfx', default='chsw', help='command prefix def chsw')
 @click.option('--wlan', default='wlan', help='wlan section to change def wlan')
@@ -90,11 +127,13 @@ def main(wfb_cfg,ip,port,ip_server,port_server,ch_id,hb_freq,mpkts,cmd_prfx,wlan
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    print(wfb_cfg,ip,port,ip_server,port_server,ch_id,hb_freq,wlan,'\n')
+    logging.info(
+        "ch_switcher start cfg=%s bind=%s:%s server=%s:%s ch_id=%s hb_freq=%s wlan=%s",
+        wfb_cfg, ip, port, ip_server, port_server, ch_id, hb_freq, wlan
+    )
 
     thread_rx.join()
     thread_tx.join()
 
 if __name__ == '__main__':
     main()
-
