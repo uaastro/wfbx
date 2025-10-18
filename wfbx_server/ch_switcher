@@ -78,7 +78,7 @@ def tx(exit_flag,wfb_cfg,sock,ip_server,port_server,ch_id,hb_freq,cmd_prfx,wlan)
         time.sleep(1/hb_freq)
 
 @click.command()
-@click.option('--wfb_cfg', default='wfb_server.cfg', help='target cfg file, default wfb_server.cfg')
+@click.option('--wfb_cfg', default='wfbx_server.cfg', help='target cfg file, default wfb_server.cfg')
 @click.option('--ip', default="127.0.0.1", help='switcher ip adress def: 127.0.0.1')
 @click.option('--port', default=14420, help='switcher port def: 14420')
 @click.option('--ip_server', default="127.0.0.1", help='channel switcher server def 127.0.0.1')
