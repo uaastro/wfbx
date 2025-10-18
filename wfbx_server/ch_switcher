@@ -8,8 +8,7 @@ import signal
 import tempfile
 import logging
 from commentedconfigparser import CommentedConfigParser
-from multiprocessing import Process
-import multiprocessing
+from multiprocessing import Event, Process
 
 
 logging.basicConfig(
@@ -37,13 +36,16 @@ def _write_config_atomic(config, path):
         logging.exception("Failed to update config %s", path)
         raise
 
-def rx(exit_flag, wfb_cfg, sock, ch_id, mpkts, cmd_prfx, wlan_sections):
-        
+
+def rx(exit_event, wfb_cfg, sock, ch_id, mpkts, cmd_prfx, wlan_sections):
     config = CommentedConfigParser()
     config.read(wfb_cfg)
-        
-    while exit_flag.value == 0:
-        data, addr = sock.recvfrom(mpkts)
+
+    while not exit_event.is_set():
+        try:
+            data, addr = sock.recvfrom(mpkts)
+        except OSError:
+            break
         line = data.decode("utf-8")
         parts = line.split(':')
         if len(parts) < 2:
@@ -54,25 +56,27 @@ def rx(exit_flag, wfb_cfg, sock, ch_id, mpkts, cmd_prfx, wlan_sections):
         except KeyError:
             logging.exception("Missing channel configuration for sections %s in %s", wlan_sections, wfb_cfg)
             continue
-        if parts[0] == str(ch_id):
-            desired = parts[1]
-            if desired == 'def':
-                continue
-            current_values = set(channels.values())
-            if len(current_values) == 1 and desired == next(iter(current_values)):
-                continue
-            for section in wlan_sections:
-                config[section]['channel'] = desired
-            logging.info("Updating %s channel -> %s", ",".join(wlan_sections), desired)
-            try:
-                _write_config_atomic(config, wfb_cfg)
-                exit_flag.value = 1
-            except Exception:
-                logging.error("Failed to persist channel change, keeping previous value")
+        if parts[0] != str(ch_id):
             continue
-                #sys.exit(0)
+        desired = parts[1]
+        if desired == 'def':
+            continue
+        current_values = set(channels.values())
+        if len(current_values) == 1 and desired == next(iter(current_values)):
+            continue
+        for section in wlan_sections:
+            config[section]['channel'] = desired
+        logging.info("Updating %s channel -> %s", ",".join(wlan_sections), desired)
+        try:
+            _write_config_atomic(config, wfb_cfg)
+        except Exception:
+            logging.error("Failed to persist channel change, keeping previous value")
+            continue
+        exit_event.set()
+        break
 
-def tx(exit_flag, wfb_cfg, sock, ip_server, port_server, ch_id, hb_freq, cmd_prfx, wlan_sections):
+
+def tx(exit_event, wfb_cfg, sock, ip_server, port_server, ch_id, hb_freq, cmd_prfx, wlan_sections):
     config = CommentedConfigParser()
     config.read(wfb_cfg)
     channel = 'def'
@@ -86,11 +90,14 @@ def tx(exit_flag, wfb_cfg, sock, ip_server, port_server, ch_id, hb_freq, cmd_prf
         if len(set(channels.values())) > 1:
             logging.warning("Sections %s have divergent channel values %s; using %s for heartbeat",
                             ",".join(wlan_sections), channels, channel)
-    msg = cmd_prfx + ':' + str(ch_id) + ':' + str(channel)
-    sock.sendto(msg.encode("utf-8"),(ip_server,port_server))
-    while exit_flag.value == 0:
-        sock.sendto(msg.encode("utf-8"),(ip_server, port_server))
-        time.sleep(1/hb_freq)
+    msg = f"{cmd_prfx}:{ch_id}:{channel}"
+    sock.sendto(msg.encode("utf-8"), (ip_server, port_server))
+    interval = 1 / hb_freq if hb_freq > 0 else 1
+    while not exit_event.is_set():
+        sock.sendto(msg.encode("utf-8"), (ip_server, port_server))
+        if exit_event.wait(interval):
+            break
+
 
 @click.command()
 @click.option('--wfb_cfg', default='wfbx_server.cfg', help='target cfg file, default wfbx_server.cfg')
@@ -103,11 +110,9 @@ def tx(exit_flag, wfb_cfg, sock, ip_server, port_server, ch_id, hb_freq, cmd_prf
 @click.option('--mpkts', default=2048, help='max udp packet size def 2048')
 @click.option('--cmd_prfx', default='chsw', help='command prefix def chsw')
 @click.option('--wlan', default='wlan', help='wlan section(s) to change (comma-separated) def wlan')
-
-def main(wfb_cfg,ip,port,ip_server,port_server,ch_id,hb_freq,mpkts,cmd_prfx,wlan):
-
-    wfb_server_dir = os.path.dirname(os.path.abspath(__file__))+"/"
-    wfb_cfg = wfb_server_dir+wfb_cfg
+def main(wfb_cfg, ip, port, ip_server, port_server, ch_id, hb_freq, mpkts, cmd_prfx, wlan):
+    wfb_server_dir = os.path.dirname(os.path.abspath(__file__)) + "/"
+    wfb_cfg = wfb_server_dir + wfb_cfg
 
     wlan_sections = [section.strip() for section in wlan.split(',') if section.strip()]
     if not wlan_sections:
@@ -123,32 +128,29 @@ def main(wfb_cfg,ip,port,ip_server,port_server,ch_id,hb_freq,mpkts,cmd_prfx,wlan
     wlan_sections = ordered_sections
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((ip, port))
 
-    manager = multiprocessing.Manager()
-    exit_flag = manager.Value('i',0)
+    exit_event = Event()
 
-    thread_rx = Process(target=rx, args=(exit_flag,wfb_cfg,sock,ch_id,mpkts,cmd_prfx,wlan_sections))
+    thread_rx = Process(target=rx, args=(exit_event, wfb_cfg, sock, ch_id, mpkts, cmd_prfx, wlan_sections))
     thread_rx.start()
 
-    thread_tx = Process(target=tx, args=(exit_flag,wfb_cfg,sock,ip_server,port_server,ch_id,hb_freq,cmd_prfx,wlan_sections))
+    thread_tx = Process(target=tx, args=(exit_event, wfb_cfg, sock, ip_server, port_server, ch_id, hb_freq, cmd_prfx, wlan_sections))
     thread_tx.start()
 
     def signal_handler(sig, frame):
-        exit_flag.value = 1
-        thread_tx.terminate()
-        thread_tx.join(timeout=0.01)
+        exit_event.set()
+        thread_tx.join(timeout=0.5)
         if thread_tx.is_alive():
-            thread_tx.kill()
+            thread_tx.terminate()
             thread_tx.join()
-        
-        thread_rx.terminate()
-        thread_rx.join(timeout=0.01)
+
+        thread_rx.join(timeout=0.5)
         if thread_rx.is_alive():
-            thread_rx.kill()
+            thread_rx.terminate()
             thread_rx.join()
-        
+
         sock.close()
         sys.exit(0)
 
@@ -162,6 +164,8 @@ def main(wfb_cfg,ip,port,ip_server,port_server,ch_id,hb_freq,mpkts,cmd_prfx,wlan
 
     thread_rx.join()
     thread_tx.join()
+    sock.close()
+
 
 if __name__ == '__main__':
     main()
