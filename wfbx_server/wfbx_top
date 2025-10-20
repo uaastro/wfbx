@@ -712,9 +712,9 @@ def render_uprx(record: ModuleRecord) -> Group:
     elif rate_quality >= 90.0:
         qlt_style = "yellow"
     values = [
-        Text(f"{pkts}", style="bright_white"),
-        Text(f"{kbps:.1f}", style="bright_white"),
-        Text(f"{lost}", style="bright_white"),
+        Text(f"{pkts}", style="bright_black"),
+        Text(f"{kbps:.1f}", style="bright_black"),
+        Text(f"{lost}", style="bright_black"),
         Text(f"{rate_quality:.1f}", style=qlt_style),
     ]
 
