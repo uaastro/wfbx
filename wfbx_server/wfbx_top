@@ -548,9 +548,6 @@ def render_tx(record: ModuleRecord) -> Group:
         ]
         blocks.append(_two_row_table(labels, values, style_label="blue", style_value="bright_black"))
 
-    if record.text_preview:
-        blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
-
     return Group(*blocks)
 
 
