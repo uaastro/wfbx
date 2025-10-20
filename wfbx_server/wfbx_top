@@ -704,23 +704,26 @@ def render_uprx(record: ModuleRecord) -> Group:
     if summary is not None:
         quality = max(0, min(quality, 100))
 
-    labels = ["pkts", "rate(kbps)", "lost", "qlt"]
+    labels = ["pkts", "rate(kbps)", "lost", "qlt%"]
+    rate_quality = float(quality)
+    qlt_style = "bright_red"
+    if rate_quality >= 97.0:
+        qlt_style = "bright_green"
+    elif rate_quality >= 90.0:
+        qlt_style = "yellow"
     values = [
-        f"{pkts}",
-        f"{kbps:.1f}",
-        f"{lost}",
-        f"{quality}",
+        Text(f"{pkts}", style="bright_white"),
+        Text(f"{kbps:.1f}", style="bright_white"),
+        Text(f"{lost}", style="bright_white"),
+        Text(f"{rate_quality:.1f}", style=qlt_style),
     ]
 
-    table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+    table = Table(box=None, show_header=False, expand=False, padding=(0, 1), pad_edge=False)
     for _ in labels:
-        table.add_column(justify="right")
+        table.add_column(justify="left")
     table.add_row(*[Text(label, style="cyan") for label in labels])
-    table.add_row(*[Text(value, style="bright_white") for value in values])
+    table.add_row(*values)
     blocks.append(table)
-
-    if record.text_preview:
-        blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
 
     return Group(*blocks)
 
