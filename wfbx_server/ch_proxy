@@ -1,0 +1,139 @@
+#!/usr/bin/python3
+
+import atexit
+import signal
+import socket
+import sys
+import threading
+import logging
+import click
+
+
+@click.command()
+@click.option('--ch_ip', default='127.0.0.1', help='ip адрес ch_server (по умолчанию 127.0.0.1)')
+@click.option('--ch_port', default=5858, type=int, help='udp порт ch_server (по умолчанию 5858)')
+@click.option('--rx_ip', default='0.0.0.0', help='локальный ip для приёма пакетов с удалённого хоста')
+@click.option('--rx_port', default=16000, type=int, help='локальный порт для приёма пакетов с удалённого хоста')
+@click.option('--tx_ip', default='127.0.0.1', help='ip удалённого хоста для передачи ответов ch_server')
+@click.option('--tx_port', default=16001, type=int, help='порт удалённого хоста для передачи ответов ch_server')
+@click.option('--mpkts', default=2048, type=int, help='максимальный размер UDP пакета (по умолчанию 2048)')
+def main(ch_ip, ch_port, rx_ip, rx_port, tx_ip, tx_port, mpkts):
+    """
+    Проксирует трафик между локальным ch_server и удалённым односторонним каналом.
+    """
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[CH_PROXY] %(asctime)s %(levelname)s %(message)s'
+    )
+
+    stop_event = threading.Event()
+    sockets = []
+
+    sock_rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock_rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, 'SO_REUSEPORT'):
+            sock_rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except Exception:
+        pass
+    sock_rx.bind((rx_ip, rx_port))
+    sock_rx.settimeout(1.0)
+    sockets.append(sock_rx)
+
+    sock_ch = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock_ch.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    except Exception:
+        pass
+    sock_ch.bind(('0.0.0.0', 0))
+    sock_ch.settimeout(1.0)
+    sockets.append(sock_ch)
+
+    sock_tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sockets.append(sock_tx)
+
+    logging.info(
+        "start ch_proxy: ch_server=%s:%s rx=%s:%s tx=%s:%s mpkts=%s",
+        ch_ip, ch_port, rx_ip, rx_port, tx_ip, tx_port, mpkts
+    )
+
+    def cleanup():
+        stop_event.set()
+        for s in sockets:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    def signal_handler(sig, frame):
+        cleanup()
+        sys.exit(0)
+
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    def pump_remote_to_ch():
+        while not stop_event.is_set():
+            try:
+                data, addr = sock_rx.recvfrom(mpkts)
+            except socket.timeout:
+                continue
+            except OSError:
+                if stop_event.is_set():
+                    break
+                continue
+            except Exception as exc:
+                logging.exception("rx loop failed: %s", exc)
+                break
+            try:
+                sock_ch.sendto(data, (ch_ip, ch_port))
+            except Exception as exc:
+                logging.exception("send to ch_server failed: %s", exc)
+                break
+        stop_event.set()
+
+    def pump_ch_to_remote():
+        while not stop_event.is_set():
+            try:
+                data, addr = sock_ch.recvfrom(mpkts)
+            except socket.timeout:
+                continue
+            except OSError:
+                if stop_event.is_set():
+                    break
+                continue
+            except Exception as exc:
+                logging.exception("ch loop failed: %s", exc)
+                break
+            try:
+                sock_tx.sendto(data, (tx_ip, tx_port))
+            except Exception as exc:
+                logging.exception("send to remote failed: %s", exc)
+                break
+        stop_event.set()
+
+    t_rx = threading.Thread(target=pump_remote_to_ch, name="ch_proxy_rx", daemon=True)
+    t_tx = threading.Thread(target=pump_ch_to_remote, name="ch_proxy_tx", daemon=True)
+    t_rx.start()
+    t_tx.start()
+
+    try:
+        while not stop_event.is_set():
+            t_rx.join(timeout=0.5)
+            t_tx.join(timeout=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        t_rx.join(timeout=1.0)
+        t_tx.join(timeout=1.0)
+        cleanup()
+
+    logging.info("ch_proxy stopped")
+
+
+if __name__ == '__main__':
+    main()
+

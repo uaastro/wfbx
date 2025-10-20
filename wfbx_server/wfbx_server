@@ -312,6 +312,26 @@ def main(conf):
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
+            elif section.startswith('ch_proxy'):
+                options = config[section]
+                module_path = wfbx_server_dir + "ch_proxy"
+                argv = [
+                    module_path,
+                    "--ch_ip", options.get('chpx_ch_ip', fallback='127.0.0.1'),
+                    "--ch_port", options.get('chpx_ch_port', fallback='5858'),
+                    "--rx_ip", options.get('chpx_rx_ip', fallback='0.0.0.0'),
+                    "--rx_port", options.get('chpx_rx_port', fallback='16000'),
+                    "--tx_ip", options.get('chpx_tx_ip', fallback='127.0.0.1'),
+                    "--tx_port", options.get('chpx_tx_port', fallback='16001'),
+                    "--mpkts", options.get('chpx_mpkts', fallback='2048'),
+                ]
+                kill_stale_process(argv[0])
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
             elif section.startswith('uart_to_udp'):
                 options = config[section]
                 argv = [wfbx_server_dir + "uart_to_udp",
