@@ -194,15 +194,19 @@ def detect_kind(header: stats_core.Header) -> str:
     module_id = (header.module_id or "").lower()
     if header.module_type == stats_core.ModuleType.MX:
         return "mx"
-    if module_id.startswith("xtx"):
-        return "xtx"
-    if module_id.startswith("xrx"):
-        return "xrx"
-    if module_id.startswith("rxx"):
-        return "rxx"
+    if header.module_type == stats_core.ModuleType.UPRX:
+        return "uprx"
+    if header.module_type == stats_core.ModuleType.PTX:
+        return "ptx"
     if header.module_type == stats_core.ModuleType.TX:
+        if module_id.startswith("xtx"):
+            return "xtx"
         return "tx"
     if header.module_type == stats_core.ModuleType.RX:
+        if module_id.startswith("xrx"):
+            return "xrx"
+        if module_id.startswith("rxx"):
+            return "rxx"
         return "rx"
     return "unknown"
 
@@ -687,13 +691,61 @@ def render_signal_bar_text(rssi: float, glyph: str = "❘") -> Text:
     return Text.from_markup(markup)
 
 
+def render_uprx(record: ModuleRecord) -> Group:
+    blocks: List = []
+    summary = record.summary
+
+    pkts = summary.packets_total if summary is not None else 0
+    lost = summary.ctrl_epoch_sent if summary is not None else 0
+    dt_ms = summary.dt_ms if summary is not None else 0
+    bytes_total = summary.bytes_total if summary is not None else 0
+    kbps = (bytes_total * 8.0 / dt_ms) if summary is not None and dt_ms > 0 else 0.0
+    pkt_rate = (pkts * 1000.0 / dt_ms) if summary is not None and dt_ms > 0 else 0.0
+    quality = summary.flags if summary is not None else 0
+    if summary is not None:
+        quality = max(0, min(quality, 100))
+
+    preview_metrics: Dict[str, str] = {}
+    if record.text_preview:
+        for token in record.text_preview.split():
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            preview_metrics[key.strip()] = value.strip().rstrip("%")
+
+    table = Table.grid(expand=True, padding=(0, 1))
+    table.add_column(style="cyan")
+    table.add_column(justify="right", style="bright_white")
+    table.add_row("Host", record.header.host_id or "-")
+    table.add_row("Tick", str(record.header.tick_id))
+    if summary is not None:
+        table.add_row("Window ms", str(summary.dt_ms))
+    table.add_row("Packets", f"{pkts}")
+    table.add_row("Lost", f"{lost}")
+    table.add_row("Pkt/s", f"{pkt_rate:.1f}")
+    table.add_row("Rate kbps", f"{kbps:.1f}")
+    table.add_row("Quality %", f"{quality}")
+    table.add_row("Link ID", preview_metrics.get("link", "-"))
+    table.add_row("Last Seq", preview_metrics.get("seq", "-"))
+    blocks.append(table)
+
+    if record.text_preview:
+        blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
+
+    return Group(*blocks)
+
+
 def render_module(record: ModuleRecord, now: float) -> Panel:
     age = now - record.last_update
     if record.kind == "mx":
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
-    elif record.kind in {"tx", "xtx"}:
+    elif record.kind == "uprx":
+        host = record.header.host_id or "-"
+        module = record.header.module_id or "unknown"
+        title = f"{host}.{module}"
+    elif record.kind in {"tx", "xtx", "ptx"}:
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
@@ -706,9 +758,11 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
     subtitle = f"age {age:0.1f}s"
     if record.kind == "mx":
         body = render_mx(record)
+    elif record.kind == "uprx":
+        body = render_uprx(record)
     elif record.kind in {"rx", "xrx", "rxx"}:
         body = render_rx(record)
-    elif record.kind in {"tx", "xtx"}:
+    elif record.kind in {"tx", "xtx", "ptx"}:
         body = render_tx(record)
     else:
         body = render_generic(record, "stat")

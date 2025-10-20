@@ -16,6 +16,7 @@ typedef enum {
     WFBX_MODULE_RX = 2,
     WFBX_MODULE_MX = 3,
     WFBX_MODULE_PTX = 4,
+    WFBX_MODULE_UPRX = 5,
     WFBX_MODULE_UNKNOWN = 255
 } wfbx_module_type_t;
 

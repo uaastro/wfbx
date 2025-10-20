@@ -1,70 +1,74 @@
 #!/usr/bin/python3
-import socket
+
 import atexit
 import signal
-import sys
+import socket
 import struct
-import click
 import sys
 import time
 
+import click
+
+from wfbxlib.stats import core as stats_core
+
 
 @click.command()
-@click.option('--mpkts', default=2048, help='udp max pkt size')
-@click.option('--ip_tx', default='127.0.0.1', help='ip of destination host')
-@click.option('--port_tx', default=5700, help='port of destination host')
-@click.option('--ip_rx', default='0.0.0.0', help='ip of source host')
-@click.option('--port_rx', default=5600, help='port of source host')
-@click.option('--port_wfbs', default=14650, help='wfb_server port')
-@click.option('--ip_wfbs', default='127.0.0.1', help='wfb_server_ip')
-@click.option('--mode', default=0, help='mode 0 aggregator (default) mode 1 forwarder')
-@click.option('--alrt_max', default=10, help='(deprecated) max number of alert pkt')
-
-def main(mpkts,ip_tx,port_tx,ip_rx,port_rx,port_wfbs,ip_wfbs, mode, alrt_max):
-
+@click.option('--mpkts', default=2048, type=int, help='максимальный размер UDP пакета')
+@click.option('--ip_tx', default='127.0.0.1', help='адрес получателя после прокси')
+@click.option('--port_tx', default=5700, type=int, help='порт получателя после прокси')
+@click.option('--ip_rx', default='0.0.0.0', help='локальный адрес приёма')
+@click.option('--port_rx', default=5600, type=int, help='локальный порт приёма')
+@click.option('--mode', default=0, type=int, help='режим 0 – снимаем заголовок, 1 – пересылаем как есть')
+@click.option('--stat_ip', default='127.0.0.1', help='адрес statd')
+@click.option('--stat_port', default=9601, type=int, help='порт statd')
+@click.option('--stat_id', default='uprx', help='идентификатор модуля в статистике')
+@click.option('--stat_period', default=1000, type=int, help='период отправки статистики (мс, 0 отключить)')
+def main(mpkts, ip_tx, port_tx, ip_rx, port_rx, mode, stat_ip, stat_port, stat_id, stat_period):
     sock_rx = None
     sock_tx = None
-    
+    sock_stat = None
+
     def cleanup():
-        for s in (sock_rx, sock_tx):
+        for s in (sock_rx, sock_tx, sock_stat):
             try:
                 if s is not None:
                     s.close()
-            except Exception as e:
-                print(e)
-                
+            except Exception:
+                pass
+
     def signal_handler(sig, frame):
         cleanup()
         sys.exit(0)
-        
+
     atexit.register(cleanup)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-
-    UDP_MAX_PKT_SIZE = mpkts
-    UDP_IP_TX= ip_tx
-    UDP_PORT_TX = port_tx
-    UDP_IP_RX = ip_rx
-    UDP_PORT_RX = port_rx
-
+    udp_max_pkt_size = mpkts
+    udp_ip_tx = ip_tx
+    udp_port_tx = port_tx
+    udp_ip_rx = ip_rx
+    udp_port_rx = port_rx
 
     last_link_id = None
     last_pkt_num = -1
-    pkt_lost = 0
-    pkts = 0
-    time_stamp = time.time()
+    lost_period = 0
+    pkts_period = 0
+    bytes_period = 0
 
-    sock_rx= socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    period_start = time.monotonic()
+    stat_tick = 0
+
+    sock_rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock_rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, 'SO_REUSEPORT'):
             sock_rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     except Exception:
         pass
-    sock_rx.bind((UDP_IP_RX,UDP_PORT_RX))
+    sock_rx.bind((udp_ip_rx, udp_port_rx))
 
-    sock_tx=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock_tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock_tx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, 'SO_REUSEPORT'):
@@ -72,47 +76,100 @@ def main(mpkts,ip_tx,port_tx,ip_rx,port_rx,port_wfbs,ip_wfbs, mode, alrt_max):
     except Exception:
         pass
 
+    stat_addr = None
+    if stat_period > 0:
+        try:
+            socket.inet_aton(stat_ip)
+            sock_stat = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            stat_addr = (stat_ip, stat_port)
+        except OSError:
+            print(f"[udp_proxy_rx] invalid stat_ip '{stat_ip}', статистика отключена")
+            sock_stat = None
+
     print("udp_proxy_rx started...")
-    print(f"rx: {UDP_IP_RX} : {UDP_PORT_RX}")
-    print(f"tx: {UDP_IP_TX} : {UDP_PORT_TX}")
+    print(f"rx: {udp_ip_rx} : {udp_port_rx}")
+    print(f"tx: {udp_ip_tx} : {udp_port_tx}")
+
+    def send_stats(now_monotonic):
+        nonlocal stat_tick, period_start, lost_period, pkts_period, bytes_period
+        if sock_stat is None or stat_addr is None:
+            return
+        dt_ms = max(1, int((now_monotonic - period_start) * 1000))
+        total = pkts_period + lost_period
+        quality = int((pkts_period * 100) / total) if total > 0 else 100
+        summary = stats_core.Summary(
+            dt_ms=dt_ms,
+            packets_total=pkts_period,
+            bytes_total=bytes_period,
+            ctrl_epoch_sent=lost_period,
+            iface_count=0,
+            tx_count=0,
+            flags=min(quality, 0xFFFF),
+        )
+        sections = stats_core.make_sections([
+            (int(stats_core.SectionType.SUMMARY), summary.pack()),
+            (int(stats_core.SectionType.TEXT_PREVIEW),
+             f"link={last_link_id or 0} seq={last_pkt_num if last_pkt_num >= 0 else 0} "
+             f"pkts={pkts_period} lost={lost_period} qlt={quality}%".encode("utf-8")),
+        ])
+        header = stats_core.Header(
+            version=1,
+            module_type=stats_core.ModuleType.UPRX,
+            module_id=stat_id,
+            host_id="",
+            tick_id=stat_tick,
+            timestamp_us=int(time.time() * 1_000_000),
+            flags=0,
+            section_count=0,
+            payload_len=0,
+        )
+        packet = stats_core.build_packet(header, sections, with_crc=True)
+        try:
+            sock_stat.sendto(packet, stat_addr)
+        except OSError as exc:
+            print(f"[udp_proxy_rx] failed to send stats: {exc}")
+        stat_tick += 1
+        period_start = now_monotonic
+        lost_period = 0
+        pkts_period = 0
+        bytes_period = 0
 
     while True:
-        packet, addr = sock_rx.recvfrom(UDP_MAX_PKT_SIZE) 
-        PACKET_SIZE = len(packet)
-        link_id, packet_number, data = struct.unpack("!II"+str((PACKET_SIZE - 8))+"s", packet)
+        packet, addr = sock_rx.recvfrom(udp_max_pkt_size)
+        packet_size = len(packet)
+        if packet_size < 8:
+            continue
+        link_id, packet_number, data = struct.unpack(f"!II{packet_size - 8}s", packet)
 
         accept = False
         if last_link_id is None or link_id != last_link_id:
             last_link_id = link_id
             last_pkt_num = packet_number
-            pkt_lost = 0
-            pkts = 0
+            lost_period = 0
+            pkts_period = 0
+            bytes_period = 0
             accept = True
             print(f"[udp_proxy_rx] link_id switched -> {link_id} (seq {packet_number})")
         elif packet_number > last_pkt_num:
-            pkt_lost += packet_number - last_pkt_num - 1
+            lost_period += packet_number - last_pkt_num - 1
             last_pkt_num = packet_number
             accept = True
 
         if not accept:
             continue
 
-        pkts += 1
-        if mode == 0:
-            sock_tx.sendto(data, (UDP_IP_TX, UDP_PORT_TX))
-        else:
-            sock_tx.sendto(packet, (UDP_IP_TX, UDP_PORT_TX))
+        pkts_period += 1
+        bytes_period += len(data)
 
-        if (time.time() - time_stamp) >= 1:
-            total = pkts + pkt_lost
-            qlt = int((pkts * 100) / total) if total > 0 else 100
-            stat_link = last_link_id if last_link_id is not None else 0
-            stat_seq = last_pkt_num if last_pkt_num >= 0 else 0
-            stat_inf = f'udp_proxy_rx PKT {stat_link}:{stat_seq}:{pkts}:{pkt_lost}:{qlt}'
-            sock_tx.sendto(stat_inf.encode("utf-8"),(ip_wfbs, port_wfbs))
-            time_stamp = time.time()
-            pkt_lost = 0
-            pkts = 0
+        if mode == 0:
+            sock_tx.sendto(data, (udp_ip_tx, udp_port_tx))
+        else:
+            sock_tx.sendto(packet, (udp_ip_tx, udp_port_tx))
+
+        now_mon = time.monotonic()
+        if stat_period > 0 and (now_mon - period_start) * 1000 >= stat_period:
+            send_stats(now_mon)
+
 
 if __name__ == '__main__':
     main()

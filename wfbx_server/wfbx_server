@@ -205,10 +205,11 @@ def main(conf):
                         "--ip_rx", options['uprx_ip_rx'],
                         "--port_rx", options['uprx_port_rx'],
                         "--mpkts", options['uprx_mpkts'],
-                        "--ip_wfbs", options['uprx_ip_wfbs'],
-                        "--port_wfbs", options['uprx_port_wfbs'],
                         "--mode", options['uprx_mode'],
-                        "--alrt_max", options['uprx_alrt_max']]
+                        "--stat_ip", options.get('uprx_stat_ip', defaults.get('uprx_stat_ip', '127.0.0.1')),
+                        "--stat_port", options.get('uprx_stat_port', defaults.get('uprx_stat_port', '9601')),
+                        "--stat_id", options.get('uprx_stat_id', defaults.get('uprx_stat_id', 'uprx')),
+                        "--stat_period", options.get('uprx_stat_period', defaults.get('uprx_stat_period', '1000'))]
                 kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
