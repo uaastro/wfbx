@@ -1,8 +1,15 @@
 #!/usr/bin/python3
-
+import os
 import psutil
 import click
 from commentedconfigparser import CommentedConfigParser
+
+def resolve_cfg_path(cfg_path):
+    cfg_path = os.path.expanduser(cfg_path)
+    if os.path.isabs(cfg_path):
+        return cfg_path
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normpath(os.path.join(base_dir, cfg_path))
 
 @click.command()
 @click.option('--wfb_cfg', default='./wfb_server.cfg', show_default=True, help='target cfg file')
@@ -24,7 +31,8 @@ def main(wfb_cfg, prfx, channel, wlans_nmbr, wlan_section):
     
 #--------------------------------------------
     config = CommentedConfigParser()
-    config.read(wfb_cfg)
+    cfg_path = resolve_cfg_path(wfb_cfg)
+    config.read(cfg_path)
 
     wlans_list = get_wlans_list(prfx)
     if not wlans_list:
@@ -43,12 +51,12 @@ def main(wfb_cfg, prfx, channel, wlans_nmbr, wlan_section):
     wlans = ' '.join(selected_wlans)
 
     if wlan_section not in config:
-        print(f"Section '{wlan_section}' not found in {wfb_cfg}")
+        print(f"Section '{wlan_section}' not found in {cfg_path}")
         return
 
     config[wlan_section]['wlan'] = wlans
 
-    with open(wfb_cfg,'w') as configfile:
+    with open(cfg_path,'w') as configfile:
         config.write(configfile)
 
 if __name__ == '__main__':

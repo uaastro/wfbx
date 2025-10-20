@@ -16,6 +16,12 @@ logging.basicConfig(
     format="[CH_SWITCHER] %(asctime)s %(levelname)s %(message)s",
 )
 
+def resolve_cfg_path(base_dir, cfg_path):
+    cfg_path = os.path.expanduser(cfg_path)
+    if os.path.isabs(cfg_path):
+        return cfg_path
+    return os.path.normpath(os.path.join(base_dir, cfg_path))
+
 
 def _write_config_atomic(config, path):
     directory = os.path.dirname(path) or "."
@@ -112,7 +118,7 @@ def tx(exit_event, wfb_cfg, sock, ip_server, port_server, ch_id, hb_freq, cmd_pr
 @click.option('--wlan', default='wlan', help='wlan section(s) to change (comma-separated) def wlan')
 def main(wfb_cfg, ip, port, ip_server, port_server, ch_id, hb_freq, mpkts, cmd_prfx, wlan):
     wfb_server_dir = os.path.dirname(os.path.abspath(__file__)) + "/"
-    wfb_cfg = wfb_server_dir + wfb_cfg
+    wfb_cfg = resolve_cfg_path(wfb_server_dir, wfb_cfg)
 
     wlan_sections = [section.strip() for section in wlan.split(',') if section.strip()]
     if not wlan_sections:

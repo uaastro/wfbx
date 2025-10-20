@@ -85,6 +85,12 @@ def kill_stale_process(pattern):
         print(f'kill_stale_process failed for {pattern}: {exc}')
     killed_patterns.add(pattern)
 
+def resolve_cfg_path(base_dir, cfg_path):
+    cfg_path = os.path.expanduser(cfg_path)
+    if os.path.isabs(cfg_path):
+        return cfg_path
+    return os.path.normpath(os.path.join(base_dir, cfg_path))
+
 @click.command()
 @click.option('--conf', default="wfbx_server.cfg", help='path to config file')
 def main(conf):
@@ -104,7 +110,7 @@ def main(conf):
     signal.signal(signal.SIGTERM, signal_handler)
 
     wfbx_server_dir = os.path.dirname(os.path.abspath(__file__)) + "/"
-    conf = wfbx_server_dir + conf
+    conf = resolve_cfg_path(wfbx_server_dir, conf)
     config = configparser.ConfigParser()
     config.read(conf)
     sections = config.sections()
