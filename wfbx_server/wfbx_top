@@ -196,8 +196,8 @@ def detect_kind(header: stats_core.Header) -> str:
         return "mx"
     if header.module_type == stats_core.ModuleType.UPRX:
         return "uprx"
-    if header.module_type == stats_core.ModuleType.FEC:
-        return "fec"
+    if header.module_type == stats_core.ModuleType.UFRX:
+        return "ufrx"
     if header.module_type == stats_core.ModuleType.PTX:
         return "ptx"
     if header.module_type == stats_core.ModuleType.TX:
@@ -733,7 +733,7 @@ def render_uprx(record: ModuleRecord) -> Group:
     return Group(*blocks)
 
 
-def render_fec(record: ModuleRecord) -> Group:
+def render_ufrx(record: ModuleRecord) -> Group:
     blocks: List = []
     summary = record.summary
 
@@ -778,7 +778,7 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
-    elif record.kind == "fec":
+    elif record.kind == "ufrx":
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
@@ -797,8 +797,8 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         body = render_mx(record)
     elif record.kind == "uprx":
         body = render_uprx(record)
-    elif record.kind == "fec":
-        body = render_fec(record)
+    elif record.kind == "ufrx":
+        body = render_ufrx(record)
     elif record.kind in {"rx", "xrx", "rxx"}:
         body = render_rx(record)
     elif record.kind in {"tx", "xtx", "ptx"}:

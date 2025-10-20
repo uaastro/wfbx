@@ -142,7 +142,7 @@ def main(mpkts,ip_rx,port_rx,ip_tx,port_tx,stat_ip,stat_port,stat_id,stat_period
         ])
         header = stats_core.Header(
             version=1,
-            module_type=stats_core.ModuleType.FEC,
+            module_type=stats_core.ModuleType.UFRX,
             module_id=stat_id,
             host_id="",
             tick_id=stat_tick,
