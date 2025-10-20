@@ -700,33 +700,23 @@ def render_uprx(record: ModuleRecord) -> Group:
     dt_ms = summary.dt_ms if summary is not None else 0
     bytes_total = summary.bytes_total if summary is not None else 0
     kbps = (bytes_total * 8.0 / dt_ms) if summary is not None and dt_ms > 0 else 0.0
-    pkt_rate = (pkts * 1000.0 / dt_ms) if summary is not None and dt_ms > 0 else 0.0
     quality = summary.flags if summary is not None else 0
     if summary is not None:
         quality = max(0, min(quality, 100))
 
-    preview_metrics: Dict[str, str] = {}
-    if record.text_preview:
-        for token in record.text_preview.split():
-            if "=" not in token:
-                continue
-            key, value = token.split("=", 1)
-            preview_metrics[key.strip()] = value.strip().rstrip("%")
+    labels = ["pkts", "rate(kbps)", "lost", "qlt"]
+    values = [
+        f"{pkts}",
+        f"{kbps:.1f}",
+        f"{lost}",
+        f"{quality}",
+    ]
 
-    table = Table.grid(expand=True, padding=(0, 1))
-    table.add_column(style="cyan")
-    table.add_column(justify="right", style="bright_white")
-    table.add_row("Host", record.header.host_id or "-")
-    table.add_row("Tick", str(record.header.tick_id))
-    if summary is not None:
-        table.add_row("Window ms", str(summary.dt_ms))
-    table.add_row("Packets", f"{pkts}")
-    table.add_row("Lost", f"{lost}")
-    table.add_row("Pkt/s", f"{pkt_rate:.1f}")
-    table.add_row("Rate kbps", f"{kbps:.1f}")
-    table.add_row("Quality %", f"{quality}")
-    table.add_row("Link ID", preview_metrics.get("link", "-"))
-    table.add_row("Last Seq", preview_metrics.get("seq", "-"))
+    table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+    for _ in labels:
+        table.add_column(justify="right")
+    table.add_row(*[Text(label, style="cyan") for label in labels])
+    table.add_row(*[Text(value, style="bright_white") for value in values])
     blocks.append(table)
 
     if record.text_preview:
