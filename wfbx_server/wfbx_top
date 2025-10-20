@@ -730,6 +730,44 @@ def render_uprx(record: ModuleRecord) -> Group:
     return Group(*blocks)
 
 
+def render_fec(record: ModuleRecord) -> Group:
+    blocks: List = []
+    summary = record.summary
+
+    pkts = summary.packets_total if summary is not None else 0
+    lost = summary.ctrl_epoch_sent if summary is not None else 0
+    dt_ms = summary.dt_ms if summary is not None else 0
+    bytes_total = summary.bytes_total if summary is not None else 0
+    kbps = (bytes_total * 8.0 / dt_ms) if summary is not None and dt_ms > 0 else 0.0
+    quality = float(summary.flags) if summary is not None else 0.0
+    quality = max(0.0, min(quality, 100.0))
+
+    labels = ["pkts", "rate(kbps)", "lost", "qlt%"]
+    qlt_style = "bright_red"
+    if quality >= 97.0:
+        qlt_style = "bright_green"
+    elif quality >= 90.0:
+        qlt_style = "yellow"
+    values = [
+        Text(f"{pkts}", style="bright_black"),
+        Text(f"{kbps:.1f}", style="bright_black"),
+        Text(f"{lost}", style="bright_black"),
+        Text(f"{quality:.1f}", style=qlt_style),
+    ]
+
+    table = Table(box=None, show_header=False, expand=False, padding=(0, 1), pad_edge=False)
+    for _ in labels:
+        table.add_column(justify="left")
+    table.add_row(*[Text(label, style="cyan") for label in labels])
+    table.add_row(*values)
+    blocks.append(table)
+
+    if record.text_preview:
+        blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
+
+    return Group(*blocks)
+
+
 def render_module(record: ModuleRecord, now: float) -> Panel:
     age = now - record.last_update
     if record.kind == "mx":
@@ -737,6 +775,10 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
     elif record.kind == "uprx":
+        host = record.header.host_id or "-"
+        module = record.header.module_id or "unknown"
+        title = f"{host}.{module}"
+    elif record.kind == "fec":
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
@@ -755,6 +797,8 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         body = render_mx(record)
     elif record.kind == "uprx":
         body = render_uprx(record)
+    elif record.kind == "fec":
+        body = render_fec(record)
     elif record.kind in {"rx", "xrx", "rxx"}:
         body = render_rx(record)
     elif record.kind in {"tx", "xtx", "ptx"}:
