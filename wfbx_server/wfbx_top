@@ -278,7 +278,13 @@ def matches_filters(record: ModuleRecord,
     if module_type_filters:
         mt = record.kind.lower()
         mt_name = record.header.module_type.name.lower()
-        if not any(filt in mt or filt in mt_name for filt in module_type_filters):
+        module_id_lower = module_id.lower()
+        if not any(
+            filt in mt or
+            filt in mt_name or
+            filt in module_id_lower
+            for filt in module_type_filters
+        ):
             return False
     return True
 
