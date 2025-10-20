@@ -1,11 +1,16 @@
 #!/usr/bin/python3
-import socket
-import struct
-import click
-import zfec
+
 import atexit
 import signal
+import socket
+import struct
 import sys
+import time
+
+import click
+import zfec
+
+from wfbxlib.stats import core as stats_core
 
 def blocks_decoder(blocks: list) -> list:
     decoded_blocks = []
@@ -34,16 +39,19 @@ def fec_decode(d_k,d_m,bloks: list,b_indexes: list) -> list:
 @click.option('--port_rx', default=7700, help='port of source stream def: 7700')
 @click.option('--ip_tx', default='127.0.0.1', help='ip of destination host def: 127.0.0.1')
 @click.option('--port_tx', default=7800, help='port of destination hosts def: 7800')
-@click.option('--ip_wfbs', default='127.0.0.1', help='wfb_server_ip')
-@click.option('--port_wfbs', default=14650, help='wfb_server port')
+@click.option('--stat_ip', default='127.0.0.1', help='statd ip')
+@click.option('--stat_port', default=9601, type=int, help='statd port')
+@click.option('--stat_id', default='ufrx', help='statistics module id')
+@click.option('--stat_period', default=1000, type=int, help='statistics period in ms (0 to disable)')
 
-def main(mpkts,ip_rx,port_rx,ip_tx,port_tx,ip_wfbs,port_wfbs):
+def main(mpkts,ip_rx,port_rx,ip_tx,port_tx,stat_ip,stat_port,stat_id,stat_period):
 
     sock_rx = None
     sock_tx = None
+    sock_stat = None
 
     def cleanup():
-        for s in (sock_rx, sock_tx):
+        for s in (sock_rx, sock_tx, sock_stat):
             try:
                 if s is not None:
                     s.close()
@@ -76,6 +84,16 @@ def main(mpkts,ip_rx,port_rx,ip_tx,port_tx,ip_wfbs,port_wfbs):
         pass
     sock_rx.bind((ip_rx, port_rx))
 
+    stat_addr = None
+    if stat_period > 0:
+        try:
+            socket.inet_aton(stat_ip)
+            sock_stat = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            stat_addr = (stat_ip, stat_port)
+        except OSError:
+            print(f"[udp_fec_rx] invalid stat_ip '{stat_ip}', statistics disabled")
+            sock_stat = None
+
     print("udp_fec_rx started...")
     print(f"rx: {ip_rx} : {port_rx}")
     print(f"tx: {ip_tx} : {port_tx}")
@@ -92,6 +110,57 @@ def main(mpkts,ip_rx,port_rx,ip_tx,port_tx,ip_wfbs,port_wfbs):
     k=b_k
     m=b_m
     blocks_counter = 0
+    ring_accounted = False
+    ring_expected_k = k
+
+    pkts_period = 0
+    bytes_period = 0
+    lost_period = 0
+    period_start = time.monotonic()
+    stat_tick = 0
+
+    def send_stats(now_monotonic):
+        nonlocal pkts_period, bytes_period, lost_period, period_start, stat_tick
+        if sock_stat is None or stat_addr is None:
+            return
+        dt_ms = max(1, int((now_monotonic - period_start) * 1000))
+        total = pkts_period + lost_period
+        quality = (pkts_period * 100.0) / total if total > 0 else 100.0
+        summary = stats_core.Summary(
+            dt_ms=dt_ms,
+            packets_total=pkts_period,
+            bytes_total=bytes_period,
+            ctrl_epoch_sent=lost_period,
+            iface_count=0,
+            tx_count=0,
+            flags=min(int(round(quality)), 0xFFFF),
+        )
+        sections = stats_core.make_sections([
+            (int(stats_core.SectionType.SUMMARY), summary.pack()),
+            (int(stats_core.SectionType.TEXT_PREVIEW),
+             f"pkts={pkts_period} lost={lost_period} qlt={quality:.1f}%".encode("utf-8")),
+        ])
+        header = stats_core.Header(
+            version=1,
+            module_type=stats_core.ModuleType.FEC,
+            module_id=stat_id,
+            host_id="",
+            tick_id=stat_tick,
+            timestamp_us=int(time.time() * 1_000_000),
+            flags=0,
+            section_count=0,
+            payload_len=0,
+        )
+        packet = stats_core.build_packet(header, sections, with_crc=True)
+        try:
+            sock_stat.sendto(packet, stat_addr)
+        except OSError as exc:
+            print(f"[udp_fec_rx] failed to send stats: {exc}")
+        stat_tick += 1
+        pkts_period = 0
+        bytes_period = 0
+        lost_period = 0
+        period_start = now_monotonic
 
     while True:
 
@@ -110,27 +179,48 @@ def main(mpkts,ip_rx,port_rx,ip_tx,port_tx,ip_wfbs,port_wfbs):
 
                 decoded_data = fec_decode(k,m,encoded_fragments,indexes)
                 #print('\n',decoded_data)
-
-                decoded_blocks = blocks_decoder(decoded_data)
-                #print ('decoded blocks: ',decoded_blocks)
-
-                for tx_block in decoded_blocks:
-                    sock_tx.sendto(tx_block,(ip_tx, port_tx))
-                    #print(tx_block)
+                decoded_blocks = []
+                if decoded_data:
+                    decoded_blocks = blocks_decoder(decoded_data)
+                decoded_count = len(decoded_blocks)
+                if decoded_count > 0:
+                    ring_accounted = True
+                    pkts_period += decoded_count
+                    bytes_period += sum(len(tx_block) for tx_block in decoded_blocks)
+                    if decoded_count < k:
+                        lost_period += (k - decoded_count)
+                    for tx_block in decoded_blocks:
+                        sock_tx.sendto(tx_block,(ip_tx, port_tx))
+                        #print(tx_block)
+                else:
+                    lost_period += k
+                    ring_accounted = True
 
             ring_rx_block, addr = sock_rx.recvfrom(mpkts)
-        
+
             rx_ring_block_size = len(ring_rx_block)
             b_rb_id, b_block_number, b_k, b_m, encoded_block = struct.unpack("!IIII"+str((rx_ring_block_size - 16))+"s", ring_rx_block)
             k=b_k
             m=b_m
             blocks_counter += 1
 
+            if stat_period > 0:
+                now_mon = time.monotonic()
+                if (now_mon - period_start) * 1000 >= stat_period:
+                    send_stats(now_mon)
+
         #preparing for next rx_ring
+        if not ring_accounted:
+            lost_period += ring_expected_k
         encoded_fragments = []
         indexes = []
         rb_id = b_rb_id
+        ring_expected_k = k
+        ring_accounted = False
         blocks_counter = 0
+        period_now = time.monotonic()
+        if stat_period > 0 and (period_now - period_start) * 1000 >= stat_period:
+            send_stats(period_now)
 
 if __name__ == '__main__':
     main()

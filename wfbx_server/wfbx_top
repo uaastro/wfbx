@@ -196,6 +196,8 @@ def detect_kind(header: stats_core.Header) -> str:
         return "mx"
     if header.module_type == stats_core.ModuleType.UPRX:
         return "uprx"
+    if header.module_type == stats_core.ModuleType.FEC:
+        return "fec"
     if header.module_type == stats_core.ModuleType.PTX:
         return "ptx"
     if header.module_type == stats_core.ModuleType.TX:

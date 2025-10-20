@@ -21,6 +21,7 @@ class ModuleType(enum.IntEnum):
     MX = 3
     PTX = 4
     UPRX = 5
+    FEC = 6
     UNKNOWN = 255
 
 

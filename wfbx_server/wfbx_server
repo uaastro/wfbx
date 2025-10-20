@@ -208,7 +208,7 @@ def main(conf):
                         "--mode", options['uprx_mode'],
                         "--stat_ip", options.get('uprx_stat_ip', defaults.get('uprx_stat_ip', '127.0.0.1')),
                         "--stat_port", options.get('uprx_stat_port', defaults.get('uprx_stat_port', '9601')),
-                        "--stat_id", options.get('uprx_stat_id', defaults.get('uprx_stat_id', 'uprx')),
+                        "--stat_id", options.get('uprx_stat_id', section),
                         "--stat_period", options.get('uprx_stat_period', defaults.get('uprx_stat_period', '1000'))]
                 kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
@@ -401,8 +401,10 @@ def main(conf):
                         "--port_rx", options['ufrx_port_rx'],
                         "--ip_tx", options['ufrx_ip_tx'],
                         "--port_tx", options['ufrx_port_tx'],
-                        "--port_wfbs", options['ufrx_port_wfbs'],
-                        "--ip_wfbs", options['ufrx_ip_wfbs']]
+                        "--stat_ip", options.get('ufrx_stat_ip', defaults.get('ufrx_stat_ip', '127.0.0.1')),
+                        "--stat_port", options.get('ufrx_stat_port', defaults.get('ufrx_stat_port', '9601')),
+                        "--stat_id", options.get('ufrx_stat_id', section),
+                        "--stat_period", options.get('ufrx_stat_period', defaults.get('ufrx_stat_period', '1000'))]
                 kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
