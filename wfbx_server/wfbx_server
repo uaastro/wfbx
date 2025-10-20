@@ -208,7 +208,7 @@ def main(conf):
                         "--mode", options['uprx_mode'],
                         "--stat_ip", options.get('uprx_stat_ip', defaults.get('uprx_stat_ip', '127.0.0.1')),
                         "--stat_port", options.get('uprx_stat_port', defaults.get('uprx_stat_port', '9601')),
-                        "--stat_id", options.get('uprx_stat_id', section),
+                        "--stat_id", section,
                         "--stat_period", options.get('uprx_stat_period', defaults.get('uprx_stat_period', '1000'))]
                 kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
@@ -403,7 +403,7 @@ def main(conf):
                         "--port_tx", options['ufrx_port_tx'],
                         "--stat_ip", options.get('ufrx_stat_ip', defaults.get('ufrx_stat_ip', '127.0.0.1')),
                         "--stat_port", options.get('ufrx_stat_port', defaults.get('ufrx_stat_port', '9601')),
-                        "--stat_id", options.get('ufrx_stat_id', section),
+                        "--stat_id", section,
                         "--stat_period", options.get('ufrx_stat_period', defaults.get('ufrx_stat_period', '1000'))]
                 kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
