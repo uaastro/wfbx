@@ -573,20 +573,6 @@ def main(conf):
                 process_list.append({"name": section, "proc": p, "fh": fh})
                 process_id[p.pid] = section
 
-            elif section.startswith('statd'):
-                options = config[section]
-                argv = [wfbx_server_dir + "wfbx_statd",
-                        "--ingest", options['statd_ingest'],
-                        "--mcast", options['statd_mcast'],
-                        "--host_id", options['statd_host_id'],
-                        "--max_len", options['statd_max_len']]
-                kill_stale_process(argv[0])
-                log_mode = options.get('log', defaults.get('log', 'off'))
-                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
-                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
-                process_list.append({"name": section, "proc": p, "fh": fh})
-                process_id[p.pid] = section
-
             elif section.startswith('statd_fwd'):
                 options = config[section]
                 argv = [wfbx_server_dir + "statd_fwd",
@@ -596,6 +582,20 @@ def main(conf):
                         "--module-id", options['stfw_module_id'],
                         "--host-id", options['stfw_host_id']]
 
+                kill_stale_process(argv[0])
+                log_mode = options.get('log', defaults.get('log', 'off'))
+                log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
+                p, fh = spawn_module(section, argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section, "proc": p, "fh": fh})
+                process_id[p.pid] = section
+
+            elif section.startswith('statd'):
+                options = config[section]
+                argv = [wfbx_server_dir + "wfbx_statd",
+                        "--ingest", options['statd_ingest'],
+                        "--mcast", options['statd_mcast'],
+                        "--host_id", options['statd_host_id'],
+                        "--max_len", options['statd_max_len']]
                 kill_stale_process(argv[0])
                 log_mode = options.get('log', defaults.get('log', 'off'))
                 log_file = options.get('log_file', wfbx_server_dir + 'log/' + section + '.log')
