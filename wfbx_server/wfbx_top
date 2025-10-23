@@ -26,8 +26,7 @@ from wfbxlib.stats import rx as stats_rx
 
 console = Console()
 VIEW_MODE = "summary"
-MAX_BATCH_PER_REFRESH = 100  # limit number of packets processed before forcing refresh
-MAX_RENDER_INTERVAL = 0.2    # seconds between enforced renders
+MAX_RENDER_INTERVAL = 0.1    # seconds between enforced renders
 
 @dataclass
 class ModuleRecord:
@@ -863,8 +862,7 @@ def main(mcast_ip: str,
     idle_sec = idle_ms / 1000.0 if idle_ms > 0 else float("inf")
 
     sock = create_mcast_socket(mcast_ip, port)
-    selector = selectors.DefaultSelector()
-    selector.register(sock, selectors.EVENT_READ)
+    sock.settimeout(0.05)
 
     total_packets = 0
     filtered_packets = 0
@@ -878,45 +876,32 @@ def main(mcast_ip: str,
     last_render_time = time.time()
     with Live(render_dashboard(modules, last_render_time), refresh_per_second=5, console=console) as live:
         while True:
-            events = selector.select(timeout=0.2)
             now = time.time()
-            batch_processed = 0
-            render_requested = False
-            for key, _mask in events:
-                if key.fileobj is not sock:
-                    continue
-                while True:
-                    try:
-                        datagram, _addr = sock.recvfrom(65535)
-                    except BlockingIOError:
-                        break
-                    except OSError:
-                        render_requested = True
-                        break
-                    if not datagram:
-                        continue
-                    total_packets += 1
-                    console.log(f"[TOP] received datagram len={len(datagram)} total={total_packets}")
-                    try:
-                        record = build_record(datagram, now)
-                    except Exception as exc:
-                        console.log(f"[TOP] decode failed: {exc}")
-                        continue
-                    if not matches_filters(record, module_id_filters, module_type_filters, host_id_filter):
+            try:
+                datagram, _addr = sock.recvfrom(65535)
+            except socket.timeout:
+                datagram = None
+            except OSError:
+                datagram = None
+
+            if datagram:
+                total_packets += 1
+                console.log(f"[TOP] received datagram len={len(datagram)} total={total_packets}")
+                try:
+                    record = build_record(datagram, now)
+                except Exception as exc:
+                    console.log(f"[TOP] decode failed: {exc}")
+                else:
+                    if matches_filters(record, module_id_filters, module_type_filters, host_id_filter):
+                        modules[record.key] = record
+                    else:
                         filtered_packets += 1
                         console.log(f"[TOP] filtered module_id={record.header.module_id} host_id={record.header.host_id}")
-                        continue
-                    modules[record.key] = record
-                    batch_processed += 1
-                    now = time.time()
-                    if batch_processed >= MAX_BATCH_PER_REFRESH or (now - last_render_time) >= MAX_RENDER_INTERVAL:
-                        render_requested = True
-                        break
-                if render_requested:
-                    break
-            prune_stale(modules, now, idle_sec)
 
-            if render_requested or (time.time() - last_render_time) >= MAX_RENDER_INTERVAL:
+            now = time.time()
+            prune_stale(modules, now, idle_sec)
+            
+            if (time.time() - last_render_time) >= MAX_RENDER_INTERVAL:
                 now = time.time()
                 try:
                     renderable = render_dashboard(modules, now)
