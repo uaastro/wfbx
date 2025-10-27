@@ -22,6 +22,7 @@ class ModuleType(enum.IntEnum):
     PTX = 4
     UPRX = 5
     UFRX = 6
+    L2_TAP = 7
     UNKNOWN = 255
 
 

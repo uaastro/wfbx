@@ -1,0 +1,327 @@
+#!/usr/bin/python3
+
+import atexit
+import os
+import selectors
+import signal
+import socket
+import sys
+import time
+from typing import Optional, Tuple
+
+import click
+
+from wfbxlib import stats_core, tap as taplib
+
+
+def parse_ifaces(value: str) -> Tuple[str, ...]:
+    if not value:
+        return ()
+    parts = []
+    for token in value.replace(",", " ").split():
+        token = token.strip()
+        if token:
+            parts.append(token)
+    return tuple(parts)
+
+
+@click.command()
+@click.option('--tap', 'tap_name', default='wfbxtap0', help='TAP interface name / default: wfbxtap0')
+@click.option('--ip_rx', default='0.0.0.0', help='local IP to receive UDP / default: 0.0.0.0')
+@click.option('--port_rx', default=5750, type=int, help='local UDP port to receive / default: 5750')
+@click.option('--ip_tx', default='127.0.0.1', help='remote IP to send UDP / default: 127.0.0.1')
+@click.option('--port_tx', default=5750, type=int, help='remote UDP port / default: 5750')
+@click.option('--mtu', default=1500, type=int, help='TAP MTU (0 = do not change) / default: 1500')
+@click.option('--txqueuelen', default=1000, type=int, help='TAP txqueuelen (0 = do not change) / default: 1000')
+@click.option('--persist/--no-persist', default=False, help='keep TAP persistent after exit / default: off')
+@click.option('--multi-queue/--no-multi-queue', default=False, help='enable IFF_MULTI_QUEUE / default: off')
+@click.option('--set-up/--no-set-up', 'set_up', default=True, help='bring TAP interface UP / default: on')
+@click.option('--bridge', default='', help='attach TAP to an existing bridge')
+@click.option('--bridge-create', default='', help='create a bridge with the given name and use it')
+@click.option('--bridge-ifaces', default='', help='comma/space separated interface list for the bridge')
+@click.option('--bridge-stp', type=click.Choice(['auto', 'on', 'off']), default='auto',
+              help='STP mode for the bridge: auto/on/off / default: auto')
+@click.option('--stat_ip', default='127.0.0.1', help='statd IP / default: 127.0.0.1')
+@click.option('--stat_port', default=9601, type=int, help='statd UDP port / default: 9601')
+@click.option('--stat_id', default='l2tap', help='stat module id / default: l2tap')
+@click.option('--stat_period', default=1000, type=int, help='stats period in ms (0 = disable) / default: 1000')
+def main(
+    tap_name: str,
+    ip_rx: str,
+    port_rx: int,
+    ip_tx: str,
+    port_tx: int,
+    mtu: int,
+    txqueuelen: int,
+    persist: bool,
+    multi_queue: bool,
+    set_up: bool,
+    bridge: str,
+    bridge_create: str,
+    bridge_ifaces: str,
+    bridge_stp: str,
+    stat_ip: str,
+    stat_port: int,
+    stat_id: str,
+    stat_period: int,
+):
+    if not sys.platform.startswith("linux"):
+        raise click.ClickException("l2tap requires Linux with /dev/net/tun")
+
+    if bridge and bridge_create:
+        raise click.ClickException("use either --bridge or --bridge-create, not both")
+
+    tap_fd: Optional[int] = None
+    tap_actual: Optional[str] = None
+    sock_rx: Optional[socket.socket] = None
+    sock_tx: Optional[socket.socket] = None
+    sock_stat: Optional[socket.socket] = None
+    stat_addr: Optional[Tuple[str, int]] = None
+
+    running = True
+
+    def cleanup():
+        nonlocal tap_fd, sock_rx, sock_tx, sock_stat
+        for sock in (sock_rx, sock_tx, sock_stat):
+            if sock is None:
+                continue
+            try:
+                sock.close()
+            except Exception:
+                pass
+        sock_rx = sock_tx = sock_stat = None
+
+        if tap_fd is not None:
+            try:
+                if not persist:
+                    taplib.set_persist(tap_fd, False)
+            except Exception:
+                pass
+            try:
+                os.close(tap_fd)
+            except Exception:
+                pass
+            tap_fd = None
+
+    def signal_handler(sig, frame):
+        nonlocal running
+        running = False
+
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # --- TAP init ---
+    try:
+        tap_fd, tap_actual = taplib.open_tap(
+            tap_name,
+            persist=persist,
+            multi_queue=multi_queue,
+        )
+    except taplib.TapError as exc:
+        raise click.ClickException(str(exc))
+
+    print(f"[l2tap] TAP: {tap_actual} (fd={tap_fd})")
+
+    try:
+        taplib.configure_iface(
+            tap_actual,
+            mtu=mtu if mtu > 0 else None,
+            txqueuelen=txqueuelen if txqueuelen > 0 else None,
+            up=set_up,
+        )
+    except taplib.TapError as exc:
+        cleanup()
+        raise click.ClickException(str(exc))
+
+    # --- Bridge handling ---
+    bridge_ifaces_tuple = parse_ifaces(bridge_ifaces)
+    bridge_name = bridge_create or bridge or ""
+    if bridge_name:
+        try:
+            if bridge_create:
+                stp_opt = None
+                if bridge_stp == "on":
+                    stp_opt = True
+                elif bridge_stp == "off":
+                    stp_opt = False
+                taplib.ensure_bridge(bridge_name, stp=stp_opt, up=True)
+                if bridge_ifaces_tuple:
+                    taplib.add_ifaces_to_bridge(bridge_name, bridge_ifaces_tuple)
+            else:
+                # existing bridge: optionally tweak STP
+                if bridge_stp in ("on", "off"):
+                    taplib.ensure_bridge(
+                        bridge_name,
+                        stp=(bridge_stp == "on"),
+                        up=True,
+                    )
+                else:
+                    taplib.configure_iface(bridge_name, up=True)
+            taplib.add_ifaces_to_bridge(bridge_name, (tap_actual,))
+            print(f"[l2tap] TAP joined bridge {bridge_name}")
+        except taplib.TapError as exc:
+            cleanup()
+            raise click.ClickException(str(exc))
+
+    # --- UDP sockets ---
+    sock_rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock_rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    except Exception:
+        pass
+    try:
+        sock_rx.bind((ip_rx, port_rx))
+    except OSError as exc:
+        cleanup()
+        raise click.ClickException(f"failed to bind UDP socket on {ip_rx}:{port_rx}: {exc}")
+
+    sock_tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock_tx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    except Exception:
+        pass
+    try:
+        sock_tx.connect((ip_tx, port_tx))
+    except OSError as exc:
+        cleanup()
+        raise click.ClickException(f"failed to connect to {ip_tx}:{port_tx}: {exc}")
+
+    print(f"[l2tap] UDP listen: {ip_rx}:{port_rx}")
+    print(f"[l2tap] UDP send  : {ip_tx}:{port_tx}")
+
+    if stat_period > 0:
+        try:
+            socket.inet_aton(stat_ip)
+            sock_stat = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            stat_addr = (stat_ip, stat_port)
+        except OSError:
+            print(f"[l2tap] invalid stat_ip '{stat_ip}', stats disabled")
+            sock_stat = None
+            stat_addr = None
+
+    selector = selectors.DefaultSelector()
+    selector.register(tap_fd, selectors.EVENT_READ, data="tap")
+    selector.register(sock_rx, selectors.EVENT_READ, data="udp")
+
+    # --- stats ---
+    period_start = time.monotonic()
+    stat_tick = 0
+    tx_pkts = 0
+    rx_pkts = 0
+    tap_write_drops = udp_send_drops = 0
+
+    read_buf = max(2000, (mtu if mtu > 0 else 2000) + 64)
+
+    def send_stats(now: float):
+        nonlocal period_start, stat_tick
+        nonlocal tx_pkts, rx_pkts, tap_write_drops, udp_send_drops
+
+        if sock_stat is None or stat_addr is None or tap_actual is None:
+            return
+
+        dt_ms = max(1, int((now - period_start) * 1000))
+        rate_tx = int((tx_pkts * 1000) / dt_ms) if dt_ms else 0
+        rate_rx = int((rx_pkts * 1000) / dt_ms) if dt_ms else 0
+        summary = stats_core.Summary(
+            dt_ms=dt_ms,
+            packets_total=tx_pkts,
+            bytes_total=rx_pkts,
+            ctrl_epoch_sent=rate_tx,
+            iface_count=rate_rx,
+            tx_count=0,
+            flags=0,
+        )
+        preview = (
+            f"tap={tap_actual} pks_tx={tx_pkts} pks_rx={rx_pkts} "
+            f"rate_tx={rate_tx}pps rate_rx={rate_rx}pps "
+            f"drops_tap={tap_write_drops} drops_udp={udp_send_drops}"
+        ).encode("utf-8")
+        sections = stats_core.make_sections([
+            (int(stats_core.SectionType.SUMMARY), summary.pack()),
+            (int(stats_core.SectionType.TEXT_PREVIEW), preview),
+        ])
+        header = stats_core.Header(
+            version=1,
+            module_type=stats_core.ModuleType.L2_TAP,
+            module_id=stat_id,
+            host_id="",
+            tick_id=stat_tick,
+            timestamp_us=int(time.time() * 1_000_000),
+            flags=0,
+            section_count=0,
+            payload_len=0,
+        )
+        packet = stats_core.build_packet(header, sections, with_crc=True)
+        try:
+            sock_stat.sendto(packet, stat_addr)
+        except OSError as exc:
+            print(f"[l2tap] failed to send stats: {exc}")
+        stat_tick += 1
+        period_start = now
+        tx_pkts = 0
+        rx_pkts = 0
+        tap_write_drops = udp_send_drops = 0
+
+    while running:
+        try:
+            events = selector.select(timeout=0.5)
+        except OSError as exc:
+            print(f"[l2tap] select() failed: {exc}")
+            break
+
+        now = time.monotonic()
+        if stat_period > 0 and (now - period_start) * 1000 >= stat_period:
+            send_stats(now)
+
+        if not events:
+            continue
+
+        for key, _mask in events:
+            if key.data == "tap":
+                try:
+                    data = os.read(tap_fd, read_buf)
+                except OSError as exc:
+                    if exc.errno in (11, 35):  # EAGAIN/EWOULDBLOCK
+                        continue
+                    print(f"[l2tap] TAP read error: {exc}")
+                    running = False
+                    break
+                if not data:
+                    continue
+                try:
+                    sock_tx.send(data)
+                except OSError as exc:
+                    udp_send_drops += 1
+                    print(f"[l2tap] UDP send error: {exc}")
+                    continue
+                tx_pkts += 1
+            elif key.data == "udp":
+                try:
+                    data, _addr = sock_rx.recvfrom(read_buf)
+                except OSError as exc:
+                    if exc.errno in (11, 35):
+                        continue
+                    print(f"[l2tap] UDP receive error: {exc}")
+                    running = False
+                    break
+                if not data:
+                    continue
+                try:
+                    written = os.write(tap_fd, data)
+                    if written != len(data):
+                        tap_write_drops += 1
+                        print(f"[l2tap] partial TAP write ({written}/{len(data)})")
+                        continue
+                except OSError as exc:
+                    tap_write_drops += 1
+                    print(f"[l2tap] TAP write error: {exc}")
+                    continue
+                rx_pkts += 1
+
+    cleanup()
+    print("[l2tap] stopped")
+
+
+if __name__ == '__main__':
+    main()

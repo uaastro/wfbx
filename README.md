@@ -5,3 +5,4 @@ wfbX - wifi broadcast framework with eXtended features:
 - Mesh mode
 - multi-path RX and TX streams
 - relay mode
+- bidirectional L2 tunnel over TAP/UDP
