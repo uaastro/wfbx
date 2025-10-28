@@ -264,6 +264,34 @@ def _parse_filter_list(raw: str) -> List[str]:
     return [part.strip().lower() for part in raw.split(",") if part.strip()]
 
 
+def render_preview_text(preview: Optional[str]) -> Optional[Text]:
+    if not preview:
+        return None
+    preview = preview.strip()
+    if not preview:
+        return None
+    parts = []
+    for token in preview.split():
+        if "=" in token:
+            key, value = token.split("=", 1)
+        else:
+            key, value = token, ""
+        parts.append((key.strip(), value.strip()))
+    text = Text()
+    for idx, (key, value) in enumerate(parts):
+        if idx > 0:
+            text.append("  ")
+        if key:
+            text.append(key, style="cyan")
+            if value:
+                text.append("=", style="cyan")
+        if value:
+            text.append(value, style="bright_black")
+    if text.plain.strip():
+        return text
+    return Text(preview, style="bright_black")
+
+
 def matches_filters(record: ModuleRecord,
                     module_id_filters: List[str],
                     module_type_filters: List[str],
@@ -462,8 +490,6 @@ def render_mx(record: ModuleRecord) -> Group:
                     blocks.append(chain_table)
             blocks.append(Text(""))
 
-    if record.text_preview:
-        blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
     return Group(*blocks)
 
 
@@ -666,17 +692,15 @@ def render_rx(record: ModuleRecord) -> Group:
     else:
         blocks.append(Text("no RX tx entries", style="dim"))
 
-    if record.text_preview:
-        blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
 
     return Group(*blocks)
 
 
 def render_generic(record: ModuleRecord, label: str) -> Group:
-    blocks: List = [render_summary_table(record)]
-    if record.text_preview:
-        blocks.append(Panel(Text(record.text_preview, style="dim"), title="preview", border_style="cyan"))
-    return Group(*blocks)
+    preview = render_preview_text(record.text_preview)
+    if preview is not None:
+        return Group(preview)
+    return Group(Text("no preview", style="dim"))
 
 
 _SIGNAL_THRESHOLDS = (
@@ -834,13 +858,21 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
     show_default=True,
     help="summary: без статистики по антеннам (mx/xrx); full: показывать все детали",
 )
+@click.option(
+    "--log-mode",
+    type=click.Choice(["full", "agr"], case_sensitive=False),
+    default="agr",
+    show_default=True,
+    help="full: verbose per-packet logging; agr: aggregated logging 5 times/sec",
+)
 def main(mcast_ip: str,
          port: int,
          idle_ms: int,
          module_id_filter: str,
          module_type_filter: str,
          host_id_filter: str,
-         view_mode: str) -> None:
+         view_mode: str,
+         log_mode: str) -> None:
     sock: Optional[socket.socket] = None
 
     def cleanup() -> None:
@@ -866,6 +898,11 @@ def main(mcast_ip: str,
 
     total_packets = 0
     filtered_packets = 0
+    per_source_counts: Dict[str, int] = {}
+    per_source_bytes: Dict[str, int] = {}
+    rate_window_packets = 0
+    rate_window_bytes = 0
+    last_agg_log = time.time()
 
     module_id_filters = _parse_filter_list(module_id_filter)
     module_type_filters = _parse_filter_list(module_type_filter)
@@ -886,20 +923,47 @@ def main(mcast_ip: str,
 
             if datagram:
                 total_packets += 1
-                console.log(f"[TOP] received datagram len={len(datagram)} total={total_packets}")
+                rate_window_packets += 1
+                rate_window_bytes += len(datagram)
                 try:
                     record = build_record(datagram, now)
                 except Exception as exc:
-                    console.log(f"[TOP] decode failed: {exc}")
+                    if log_mode.lower() == "full":
+                        console.log(f"[TOP] decode failed: {exc}")
                 else:
                     if matches_filters(record, module_id_filters, module_type_filters, host_id_filter):
                         modules[record.key] = record
+                        if log_mode.lower() == "full":
+                            console.log(f"[TOP] received datagram len={len(datagram)} module={record.key}")
+                        else:
+                            per_source_counts[record.key] = per_source_counts.get(record.key, 0) + 1
+                            per_source_bytes[record.key] = per_source_bytes.get(record.key, 0) + len(datagram)
                     else:
                         filtered_packets += 1
-                        console.log(f"[TOP] filtered module_id={record.header.module_id} host_id={record.header.host_id}")
+                        if log_mode.lower() == "full":
+                            console.log(f"[TOP] filtered module_id={record.header.module_id} host_id={record.header.host_id}")
 
             now = time.time()
             prune_stale(modules, now, idle_sec)
+
+            if log_mode.lower() == "agr" and (now - last_agg_log) >= 0.2:
+                elapsed = max(now - last_agg_log, 1e-6)
+                rate_pps = rate_window_packets / elapsed
+                rate_kbps = (rate_window_bytes * 8.0 / 1000.0) / elapsed
+                if rate_window_packets or filtered_packets:
+                    sources = ", ".join(
+                        f"{key}:{count}/{per_source_bytes.get(key, 0)}B"
+                        for key, count in per_source_counts.items()
+                    ) or "-"
+                    console.log(
+                        f"[TOP] agg packets={total_packets} recent_pps={rate_pps:.1f} recent_kbps={rate_kbps:.1f} "
+                        f"filtered_total={filtered_packets} sources={sources}"
+                    )
+                per_source_counts.clear()
+                per_source_bytes.clear()
+                rate_window_packets = 0
+                rate_window_bytes = 0
+                last_agg_log = now
 
             if (time.time() - last_render_time) >= MAX_RENDER_INTERVAL:
                 now = time.time()
