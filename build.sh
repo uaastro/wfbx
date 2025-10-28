@@ -26,6 +26,10 @@ echo "[BUILD] legacy wfb_tx"
 $CC $CFLAGS -o ./bin/wfb_tx ./src/wfb_tx.c $LDFLAGS_COMMON -lpcap
 
 echo "[BUILD] legacy wfb_rx"
-$CC $CFLAGS -o ./bin/wfb_rx ./src/wfb_rx.c $LDFLAGS_COMMON -lpcap
+$CC $CFLAGS -o ./bin/wfb_rx \
+  ./src/wfb_rx.c \
+  ./src/wfbx_stats_core.c \
+  ./src/wfb_stats_rx_legacy.c \
+  $LDFLAGS_COMMON -lpcap -lm
 
 echo "Done. Binaries in ./bin"

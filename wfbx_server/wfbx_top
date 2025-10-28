@@ -7,7 +7,7 @@ import socket
 import sys
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import click
 from rich import box
@@ -23,6 +23,7 @@ from wfbxlib.stats import core as stats_core
 from wfbxlib.stats import mx as stats_mx
 from wfbxlib.stats import tx as stats_tx
 from wfbxlib.stats import rx as stats_rx
+from wfbxlib.stats import legacy_rx as stats_legacy_rx
 from wfbxlib.stats import ptx as stats_ptx
 
 console = Console()
@@ -44,10 +45,10 @@ class ModuleRecord:
     tx_queue: Optional[stats_tx.QueueStats]
     tx_slot: Optional[stats_tx.SlotStats]
     tx_epoch: Optional[stats_tx.EpochStats]
-    rx_summary: Optional[stats_rx.Summary]
-    rx_tx_entries: List[stats_rx.TxSummary]
-    rx_if_entries: List[stats_rx.IfDetail]
-    rx_filter: Optional[stats_rx.FilterInfo]
+    rx_summary: Optional[Any]
+    rx_tx_entries: List[Any]
+    rx_if_entries: List[Any]
+    rx_filter: Optional[Any]
     ptx_summary: Optional[stats_ptx.Summary]
     last_update: float
 
@@ -126,30 +127,51 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
                 except ValueError:
                     mx_filter = None
         elif header.module_type in (stats_core.ModuleType.RX, stats_core.ModuleType.XRX):
-            try:
-                rx_type = stats_rx.SectionType(section_type)
-            except ValueError:
-                continue
-            if rx_type == stats_rx.SectionType.SUMMARY:
+            if header.module_type == stats_core.ModuleType.XRX:
                 try:
-                    rx_summary = stats_rx.Summary.unpack(payload)
+                    rx_type = stats_rx.SectionType(section_type)
                 except ValueError:
-                    rx_summary = None
-            elif rx_type == stats_rx.SectionType.TX_SUMMARY:
+                    continue
+                if rx_type == stats_rx.SectionType.SUMMARY:
+                    try:
+                        rx_summary = stats_rx.Summary.unpack(payload)
+                    except ValueError:
+                        rx_summary = None
+                elif rx_type == stats_rx.SectionType.TX_SUMMARY:
+                    try:
+                        rx_tx_entries = stats_rx.unpack_tx_summary_section(payload)
+                    except ValueError:
+                        rx_tx_entries = []
+                elif rx_type == stats_rx.SectionType.IF_DETAIL:
+                    try:
+                        rx_if_entries = stats_rx.unpack_if_detail_section(payload)
+                    except ValueError:
+                        rx_if_entries = []
+                elif rx_type == stats_rx.SectionType.FILTERS:
+                    try:
+                        rx_filter = stats_rx.unpack_filter_section(payload)
+                    except ValueError:
+                        rx_filter = None
+            else:
                 try:
-                    rx_tx_entries = stats_rx.unpack_tx_summary_section(payload)
+                    rx_type = stats_legacy_rx.SectionType(section_type)
                 except ValueError:
-                    rx_tx_entries = []
-            elif rx_type == stats_rx.SectionType.IF_DETAIL:
-                try:
-                    rx_if_entries = stats_rx.unpack_if_detail_section(payload)
-                except ValueError:
-                    rx_if_entries = []
-            elif rx_type == stats_rx.SectionType.FILTERS:
-                try:
-                    rx_filter = stats_rx.unpack_filter_section(payload)
-                except ValueError:
-                    rx_filter = None
+                    continue
+                if rx_type == stats_legacy_rx.SectionType.SUMMARY:
+                    try:
+                        rx_summary = stats_legacy_rx.Summary.unpack(payload)
+                    except ValueError:
+                        rx_summary = None
+                elif rx_type == stats_legacy_rx.SectionType.TX_SUMMARY:
+                    try:
+                        rx_tx_entries = stats_legacy_rx.unpack_tx_summary_section(payload)
+                    except ValueError:
+                        rx_tx_entries = []
+                elif rx_type == stats_legacy_rx.SectionType.FILTERS:
+                    try:
+                        rx_filter = stats_legacy_rx.FilterInfo.unpack(payload)
+                    except ValueError:
+                        rx_filter = None
         elif header.module_type in (stats_core.ModuleType.TX, stats_core.ModuleType.XTX):
             try:
                 tx_type = stats_tx.SectionType(section_type)
@@ -621,7 +643,7 @@ def render_rx(record: ModuleRecord) -> Group:
 
     info_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
     info_table.add_row(*[Text(label, style="cyan") for label in labels])
-    info_table.add_row(*values)
+    info_table.add_row(*[Text(value, style="bright_black") for value in values])
     blocks.append(info_table)
 
     dt_ms = summary.dt_ms if summary and summary.dt_ms > 0 else 1000

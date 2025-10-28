@@ -6,6 +6,9 @@
 #ifndef _BSD_SOURCE
 #define _BSD_SOURCE 1
 #endif
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE 1
+#endif
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -42,6 +45,8 @@
 
 #ifdef __linux__
   #include <endian.h>
+#elif defined(__APPLE__)
+  #include <libkern/OSByteOrder.h>
 #else
   #include <sys/endian.h>
 #endif

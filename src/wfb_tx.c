@@ -2,6 +2,11 @@
 // Preserves CLI and behavior of udp2wfb.c; uses shared defs from wfb_defs.h.
 // Build: gcc -O2 -Wall -o wfb_tx wfb_tx.c -lpcap
 
+#ifndef _DARWIN_C_SOURCE
+#define _DARWIN_C_SOURCE 1
+#endif
+
+#include <sys/types.h>
 #include <pcap/pcap.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -16,6 +21,8 @@
 
 #ifdef __linux__
   #include <endian.h>
+#elif defined(__APPLE__)
+  #include <libkern/OSByteOrder.h>
 #else
   #include <sys/endian.h>
 #endif
