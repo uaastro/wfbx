@@ -807,7 +807,7 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
-    elif record.kind in {"tx", "xtx", "ptx"}:
+    elif record.kind in {"tx", "xtx"}:
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
