@@ -23,6 +23,7 @@ from wfbxlib.stats import core as stats_core
 from wfbxlib.stats import mx as stats_mx
 from wfbxlib.stats import tx as stats_tx
 from wfbxlib.stats import rx as stats_rx
+from wfbxlib.stats import ptx as stats_ptx
 
 console = Console()
 VIEW_MODE = "summary"
@@ -47,6 +48,7 @@ class ModuleRecord:
     rx_tx_entries: List[stats_rx.TxSummary]
     rx_if_entries: List[stats_rx.IfDetail]
     rx_filter: Optional[stats_rx.FilterInfo]
+    ptx_summary: Optional[stats_ptx.Summary]
     last_update: float
 
 
@@ -88,6 +90,8 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
     rx_tx_entries: List[stats_rx.TxSummary] = []
     rx_if_entries: List[stats_rx.IfDetail] = []
     rx_filter: Optional[stats_rx.FilterInfo] = None
+    ptx_summary: Optional[stats_ptx.Summary] = None
+    ptx_summary: Optional[stats_ptx.Summary] = None
 
     for section_type, payload in sections:
         if section_type == stats_core.SectionType.SUMMARY:
@@ -172,6 +176,12 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
                     tx_epoch = stats_tx.EpochStats.unpack(payload)
                 except ValueError:
                     tx_epoch = None
+        elif header.module_type == stats_core.ModuleType.PTX:
+            if section_type == 0x0300:
+                try:
+                    ptx_summary = stats_ptx.Summary.unpack(payload)
+                except ValueError:
+                    ptx_summary = None
 
     return (
         summary,
@@ -188,6 +198,7 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
         rx_tx_entries,
         rx_if_entries,
         rx_filter,
+        ptx_summary,
     )
 
 
@@ -231,6 +242,7 @@ def build_record(datagram: bytes, now: float) -> ModuleRecord:
         rx_tx_entries,
         rx_if_entries,
         rx_filter,
+        ptx_summary,
     ) = parse_sections(header, sections)
     host_id = header.host_id or "unknown"
     module_id = header.module_id or "unknown"
@@ -254,6 +266,7 @@ def build_record(datagram: bytes, now: float) -> ModuleRecord:
         rx_tx_entries=rx_tx_entries,
         rx_if_entries=rx_if_entries,
         rx_filter=rx_filter,
+        ptx_summary=ptx_summary,
         last_update=now,
     )
 
@@ -696,6 +709,40 @@ def render_rx(record: ModuleRecord) -> Group:
     return Group(*blocks)
 
 
+def render_ptx(record: ModuleRecord) -> Group:
+    blocks: List = []
+    summary = record.ptx_summary
+    if summary is not None and summary.dt_ms > 0:
+        labels = [
+            "rx_pkts",
+            "rx_rate(kbps)",
+            "fwd_pkts",
+            "fwd_rate(kbps)",
+            "drop_pkts",
+            "drop_bytes",
+        ]
+        rx_rate = (summary.rx_bytes * 8.0) / summary.dt_ms
+        fwd_rate = (summary.fwd_bytes * 8.0) / summary.dt_ms
+        values = [
+            f"{summary.rx_packets}",
+            f"{rx_rate:.1f}",
+            f"{summary.fwd_packets}",
+            f"{fwd_rate:.1f}",
+            f"{summary.drop_packets}",
+            f"{summary.drop_bytes}",
+        ]
+        table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+        table.add_row(*[Text(label, style="cyan") for label in labels])
+        table.add_row(*[Text(val, style="bright_black") for val in values])
+        blocks.append(table)
+    preview = render_preview_text(record.text_preview)
+    if preview is not None:
+        blocks.append(preview)
+    if not blocks:
+        blocks.append(Text("no PTX data", style="dim"))
+    return Group(*blocks)
+
+
 def render_generic(record: ModuleRecord, label: str) -> Group:
     preview = render_preview_text(record.text_preview)
     if preview is not None:
@@ -815,6 +862,10 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
+    elif record.kind == "ptx":
+        host = record.header.host_id or "-"
+        module = record.header.module_id or "unknown"
+        title = f"{host}.{module}"
     else:
         title = f"{record.header.module_id or 'unknown'} [{record.kind}]"
     subtitle = f"age {age:0.1f}s"
@@ -826,7 +877,9 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         body = render_ufrx(record)
     elif record.kind in {"rx", "xrx", "rxx"}:
         body = render_rx(record)
-    elif record.kind in {"tx", "xtx", "ptx"}:
+    elif record.kind == "ptx":
+        body = render_ptx(record)
+    elif record.kind in {"tx", "xtx"}:
         body = render_tx(record)
     else:
         body = render_generic(record, "stat")
