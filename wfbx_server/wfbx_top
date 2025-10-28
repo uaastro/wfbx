@@ -718,8 +718,6 @@ def render_ptx(record: ModuleRecord) -> Group:
             "rx_rate(kbps)",
             "fwd_pkts",
             "fwd_rate(kbps)",
-            "drop_pkts",
-            "drop_bytes",
         ]
         rx_rate = (summary.rx_bytes * 8.0) / summary.dt_ms
         fwd_rate = (summary.fwd_bytes * 8.0) / summary.dt_ms
@@ -728,16 +726,11 @@ def render_ptx(record: ModuleRecord) -> Group:
             f"{rx_rate:.1f}",
             f"{summary.fwd_packets}",
             f"{fwd_rate:.1f}",
-            f"{summary.drop_packets}",
-            f"{summary.drop_bytes}",
         ]
         table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
         table.add_row(*[Text(label, style="cyan") for label in labels])
         table.add_row(*[Text(val, style="bright_black") for val in values])
         blocks.append(table)
-    preview = render_preview_text(record.text_preview)
-    if preview is not None:
-        blocks.append(preview)
     if not blocks:
         blocks.append(Text("no PTX data", style="dim"))
     return Group(*blocks)
