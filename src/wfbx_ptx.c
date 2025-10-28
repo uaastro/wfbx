@@ -123,6 +123,27 @@ static void stats_send_summary(uint32_t dt_ms)
   }
   section_count++;
 
+  if (dt_ms > 0 && g_stat_enabled) {
+    char preview_buf[128];
+    int preview_len = 0;
+    double rx_rate = (double)summary.rx_bytes * 8.0 / (double)dt_ms;
+    double fwd_rate = (double)summary.fwd_bytes * 8.0 / (double)dt_ms;
+    preview_len = snprintf(preview_buf, sizeof(preview_buf),
+                           "rx_packets=%u rx_rates=%.1fkbps fwd_packets=%u fwd_rates=%.1fkbps",
+                           summary.rx_packets, rx_rate,
+                           summary.fwd_packets, fwd_rate);
+    if (preview_len > 0 && preview_len < (int)sizeof(preview_buf)) {
+      if (stats_append_section(payload_buf, &payload_off, sizeof(payload_buf),
+                               WFBX_SECTION_TEXT_PREVIEW,
+                               (const uint8_t*)preview_buf,
+                               (uint16_t)preview_len) != 0) {
+        fprintf(stderr, "[STATS] PTX append preview failed\n");
+        return;
+      }
+      section_count++;
+    }
+  }
+
   wfbx_stats_header_t hdr;
   if (wfbx_stats_header_init(&hdr,
                              1,
