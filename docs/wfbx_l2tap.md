@@ -15,26 +15,23 @@ l2tap_ip_rx = 0.0.0.0
 l2tap_port_rx = 6000
 l2tap_ip_tx = 10.10.0.2
 l2tap_port_tx = 6001
-l2tap_bridge_create = br-wfbx
-l2tap_bridge_ifaces = eth0
+l2tap_bridge = br-wfbx
 
 [l2tap_air]
 l2tap_ip_rx = 0.0.0.0
 l2tap_port_rx = 6001
 l2tap_ip_tx = 10.10.0.1
 l2tap_port_tx = 6000
-l2tap_bridge_create = br-wfbx
-l2tap_bridge_ifaces = eth1
+l2tap_bridge = br-wfbx
 ```
 
 Each instance uses the TAP name from `DEFAULT` (wfbxtap0) and its own pair of UDP
-ports. Ensure the radio chain provides slots in both directions for the chosen ports.
+ports. The TAP is always brought UP, created without persistence and single-queue.
+Ensure the radio chain provides slots in both directions for the chosen ports.
 
 ## Bridge Management
 
 - `l2tap_bridge=<name>` — attach the TAP to an existing bridge.
-- `l2tap_bridge_create=<name>` — create a new bridge, bring it up, and add the
-  interfaces listed in `l2tap_bridge_ifaces`.
 - `l2tap_bridge_stp=auto|on|off` — control STP behaviour.
 
 If you do not need a bridge (point-to-point), leave those fields empty and assign
@@ -42,14 +39,9 @@ IP/routes on `wfbxtap0` manually.
 
 ## Monitoring
 
-The module reports to statd using the `L2_TAP` module type. The summary payload encodes:
-
-- `pks_tx` — packets sent from TAP to UDP during the period.
-- `pks_rx` — packets delivered from UDP into TAP.
-- `rate_tx` — transmit packet rate (packets per second, integer).
-- `rate_rx` — receive packet rate (packets per second).
-
-The text preview additionally shows TAP/UDP drop counters for quick inspection.
+The module reports to statd using the `L2_TAP` module type. The summary payload encodes
+`pks_tx`, `pks_rx`, `rate_tx`, `rate_rx` (packets per second). The text preview also
+lists TAP/UDP drop counters for quick inspection.
 
 ## Limitations
 

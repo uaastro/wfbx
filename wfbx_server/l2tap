@@ -32,13 +32,7 @@ def parse_ifaces(value: str) -> Tuple[str, ...]:
 @click.option('--ip_tx', default='127.0.0.1', help='remote IP to send UDP / default: 127.0.0.1')
 @click.option('--port_tx', default=5750, type=int, help='remote UDP port / default: 5750')
 @click.option('--mtu', default=1500, type=int, help='TAP MTU (0 = do not change) / default: 1500')
-@click.option('--txqueuelen', default=1000, type=int, help='TAP txqueuelen (0 = do not change) / default: 1000')
-@click.option('--persist/--no-persist', default=False, help='keep TAP persistent after exit / default: off')
-@click.option('--multi-queue/--no-multi-queue', default=False, help='enable IFF_MULTI_QUEUE / default: off')
-@click.option('--set-up/--no-set-up', 'set_up', default=True, help='bring TAP interface UP / default: on')
 @click.option('--bridge', default='', help='attach TAP to an existing bridge')
-@click.option('--bridge-create', default='', help='create a bridge with the given name and use it')
-@click.option('--bridge-ifaces', default='', help='comma/space separated interface list for the bridge')
 @click.option('--bridge-stp', type=click.Choice(['auto', 'on', 'off']), default='auto',
               help='STP mode for the bridge: auto/on/off / default: auto')
 @click.option('--stat_ip', default='127.0.0.1', help='statd IP / default: 127.0.0.1')
@@ -52,13 +46,7 @@ def main(
     ip_tx: str,
     port_tx: int,
     mtu: int,
-    txqueuelen: int,
-    persist: bool,
-    multi_queue: bool,
-    set_up: bool,
     bridge: str,
-    bridge_create: str,
-    bridge_ifaces: str,
     bridge_stp: str,
     stat_ip: str,
     stat_port: int,
@@ -68,17 +56,12 @@ def main(
     if not sys.platform.startswith("linux"):
         raise click.ClickException("l2tap requires Linux with /dev/net/tun")
 
-    if bridge and bridge_create:
-        raise click.ClickException("use either --bridge or --bridge-create, not both")
-
     tap_fd: Optional[int] = None
     tap_actual: Optional[str] = None
     sock_rx: Optional[socket.socket] = None
     sock_tx: Optional[socket.socket] = None
     sock_stat: Optional[socket.socket] = None
     stat_addr: Optional[Tuple[str, int]] = None
-
-    running = True
 
     def cleanup():
         nonlocal tap_fd, sock_rx, sock_tx, sock_stat
@@ -93,8 +76,7 @@ def main(
 
         if tap_fd is not None:
             try:
-                if not persist:
-                    taplib.set_persist(tap_fd, False)
+                taplib.set_persist(tap_fd, False)
             except Exception:
                 pass
             try:
@@ -104,8 +86,8 @@ def main(
             tap_fd = None
 
     def signal_handler(sig, frame):
-        nonlocal running
-        running = False
+        cleanup()
+        sys.exit(0)
 
     atexit.register(cleanup)
     signal.signal(signal.SIGINT, signal_handler)
@@ -115,8 +97,8 @@ def main(
     try:
         tap_fd, tap_actual = taplib.open_tap(
             tap_name,
-            persist=persist,
-            multi_queue=multi_queue,
+            persist=False,
+            multi_queue=False,
         )
     except taplib.TapError as exc:
         raise click.ClickException(str(exc))
@@ -127,37 +109,25 @@ def main(
         taplib.configure_iface(
             tap_actual,
             mtu=mtu if mtu > 0 else None,
-            txqueuelen=txqueuelen if txqueuelen > 0 else None,
-            up=set_up,
+            txqueuelen=None,
+            up=True,
         )
     except taplib.TapError as exc:
         cleanup()
         raise click.ClickException(str(exc))
 
     # --- Bridge handling ---
-    bridge_ifaces_tuple = parse_ifaces(bridge_ifaces)
-    bridge_name = bridge_create or bridge or ""
+    bridge_name = bridge or ""
     if bridge_name:
         try:
-            if bridge_create:
-                stp_opt = None
-                if bridge_stp == "on":
-                    stp_opt = True
-                elif bridge_stp == "off":
-                    stp_opt = False
-                taplib.ensure_bridge(bridge_name, stp=stp_opt, up=True)
-                if bridge_ifaces_tuple:
-                    taplib.add_ifaces_to_bridge(bridge_name, bridge_ifaces_tuple)
+            if bridge_stp in ("on", "off"):
+                taplib.ensure_bridge(
+                    bridge_name,
+                    stp=(bridge_stp == "on"),
+                    up=True,
+                )
             else:
-                # existing bridge: optionally tweak STP
-                if bridge_stp in ("on", "off"):
-                    taplib.ensure_bridge(
-                        bridge_name,
-                        stp=(bridge_stp == "on"),
-                        up=True,
-                    )
-                else:
-                    taplib.configure_iface(bridge_name, up=True)
+                taplib.configure_iface(bridge_name, up=True)
             taplib.add_ifaces_to_bridge(bridge_name, (tap_actual,))
             print(f"[l2tap] TAP joined bridge {bridge_name}")
         except taplib.TapError as exc:
@@ -263,7 +233,7 @@ def main(
         rx_pkts = 0
         tap_write_drops = udp_send_drops = 0
 
-    while running:
+    while True:
         try:
             events = selector.select(timeout=0.5)
         except OSError as exc:
@@ -285,8 +255,8 @@ def main(
                     if exc.errno in (11, 35):  # EAGAIN/EWOULDBLOCK
                         continue
                     print(f"[l2tap] TAP read error: {exc}")
-                    running = False
-                    break
+                    cleanup()
+                    sys.exit(1)
                 if not data:
                     continue
                 try:
@@ -303,8 +273,8 @@ def main(
                     if exc.errno in (11, 35):
                         continue
                     print(f"[l2tap] UDP receive error: {exc}")
-                    running = False
-                    break
+                    cleanup()
+                    sys.exit(1)
                 if not data:
                     continue
                 try:

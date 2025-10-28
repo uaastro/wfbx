@@ -92,13 +92,6 @@ def resolve_cfg_path(base_dir, cfg_path):
     return os.path.normpath(os.path.join(base_dir, cfg_path))
 
 
-def parse_bool(value, default=False):
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
-
 @click.command()
 @click.option('--conf', default="wfbx_server.cfg", help='path to config file')
 def main(conf):
@@ -234,32 +227,13 @@ def main(conf):
                         "--ip_tx", options.get('l2tap_ip_tx', defaults.get('l2tap_ip_tx', '127.0.0.1')),
                         "--port_tx", options.get('l2tap_port_tx', defaults.get('l2tap_port_tx', '5750')),
                         "--mtu", options.get('l2tap_mtu', defaults.get('l2tap_mtu', '1500')),
-                        "--txqueuelen", options.get('l2tap_txqueuelen', defaults.get('l2tap_txqueuelen', '1000')),
                         "--stat_ip", options.get('l2tap_stat_ip', defaults.get('l2tap_stat_ip', '127.0.0.1')),
                         "--stat_port", options.get('l2tap_stat_port', defaults.get('l2tap_stat_port', '9601')),
                         "--stat_id", section,
                         "--stat_period", options.get('l2tap_stat_period', defaults.get('l2tap_stat_period', '1000'))]
-                if parse_bool(options.get('l2tap_persist', defaults.get('l2tap_persist', 'no')), False):
-                    argv.append("--persist")
-                else:
-                    argv.append("--no-persist")
-                if parse_bool(options.get('l2tap_set_up', defaults.get('l2tap_set_up', 'yes')), True):
-                    argv.append("--set-up")
-                else:
-                    argv.append("--no-set-up")
-                if parse_bool(options.get('l2tap_multi_queue', defaults.get('l2tap_multi_queue', 'no')), False):
-                    argv.append("--multi-queue")
-                else:
-                    argv.append("--no-multi-queue")
                 bridge_name = options.get('l2tap_bridge', defaults.get('l2tap_bridge', ''))
-                bridge_create = options.get('l2tap_bridge_create', defaults.get('l2tap_bridge_create', ''))
                 if bridge_name:
                     argv.extend(["--bridge", bridge_name])
-                if bridge_create:
-                    argv.extend(["--bridge-create", bridge_create])
-                bridge_ifaces = options.get('l2tap_bridge_ifaces', defaults.get('l2tap_bridge_ifaces', ''))
-                if bridge_ifaces:
-                    argv.extend(["--bridge-ifaces", bridge_ifaces])
                 bridge_stp = options.get('l2tap_bridge_stp', defaults.get('l2tap_bridge_stp', 'auto'))
                 if bridge_stp:
                     argv.extend(["--bridge-stp", bridge_stp])
