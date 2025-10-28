@@ -53,12 +53,24 @@ Immediately after the header, `section_count` records are packed back-to-back. E
 
 ### Module Type Legend
 
-| Value | Module        |
-|-------|---------------|
-| 0x01  | `WFBX_TX`     |
-| 0x02  | `WFBX_RX`     |
-| 0x03  | `WFBX_MX`     |
-| 0xFF  | Reserved / unknown |
+| Value | Module                                   |
+|-------|------------------------------------------|
+| 0x01  | `WFBX_TX` — **legacy** wfb_tx (classic uni-directional) |
+| 0x02  | `WFBX_RX` — **legacy** wfb_rx                      |
+| 0x03  | `WFBX_MX`                                        |
+| 0x04  | `WFBX_PTX`                                       |
+| 0x05  | `WFBX_UPRX`                                      |
+| 0x06  | `WFBX_UFRX`                                      |
+| 0x07  | `WFBX_XTX` — mesh-aware wfbx_tx                   |
+| 0x08  | `WFBX_XRX` — mesh-aware wfbx_rx                   |
+| 0x09  | `WFBX_L2_TAP`                                    |
+| 0xFF  | Reserved / unknown                               |
+
+> **Note**
+>
+> * `wfb_tx`/`wfb_rx` (legacy classic link) report as module types `WFBX_TX` / `WFBX_RX`.
+> * `wfbx_tx`/`wfbx_rx` (mesh-capable pipeline) report as `WFBX_XTX` / `WFBX_XRX`.
+> * PTX uses `WFBX_PTX` and exposes pre-TX multiplexer stats.
 
 Sections are not padded. Receivers should skip unknown section `type`s by advancing `length` bytes.
 

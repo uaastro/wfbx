@@ -12,12 +12,15 @@ extern "C" {
 #define WFBX_STATS_MAGIC_LEN 4
 
 typedef enum {
-    WFBX_MODULE_TX = 1,
-    WFBX_MODULE_RX = 2,
-    WFBX_MODULE_MX = 3,
-    WFBX_MODULE_PTX = 4,
+    WFBX_MODULE_TX   = 1,
+    WFBX_MODULE_RX   = 2,
+    WFBX_MODULE_MX   = 3,
+    WFBX_MODULE_PTX  = 4,
     WFBX_MODULE_UPRX = 5,
     WFBX_MODULE_UFRX = 6,
+    WFBX_MODULE_XTX  = 7,
+    WFBX_MODULE_XRX  = 8,
+    WFBX_MODULE_L2_TAP = 9,
     WFBX_MODULE_UNKNOWN = 255
 } wfbx_module_type_t;
 

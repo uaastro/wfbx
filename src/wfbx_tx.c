@@ -1045,7 +1045,7 @@ static void* thr_sched(void* arg)
             uint32_t tick = g_stat_tick_id++;
             if (wfbx_stats_header_init(&hdr,
                                        1,
-                                       WFBX_MODULE_TX,
+                                       WFBX_MODULE_XTX,
                                        g_stat_module_id,
                                        NULL,
                                        tick,

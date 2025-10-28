@@ -91,7 +91,6 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
     rx_if_entries: List[stats_rx.IfDetail] = []
     rx_filter: Optional[stats_rx.FilterInfo] = None
     ptx_summary: Optional[stats_ptx.Summary] = None
-    ptx_summary: Optional[stats_ptx.Summary] = None
 
     for section_type, payload in sections:
         if section_type == stats_core.SectionType.SUMMARY:
@@ -126,7 +125,7 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
                     mx_filter = stats_mx.FilterInfo.unpack(payload)
                 except ValueError:
                     mx_filter = None
-        elif header.module_type == stats_core.ModuleType.RX:
+        elif header.module_type in (stats_core.ModuleType.RX, stats_core.ModuleType.XRX):
             try:
                 rx_type = stats_rx.SectionType(section_type)
             except ValueError:
@@ -151,7 +150,7 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
                     rx_filter = stats_rx.unpack_filter_section(payload)
                 except ValueError:
                     rx_filter = None
-        elif header.module_type == stats_core.ModuleType.TX:
+        elif header.module_type in (stats_core.ModuleType.TX, stats_core.ModuleType.XTX):
             try:
                 tx_type = stats_tx.SectionType(section_type)
             except ValueError:
@@ -204,6 +203,10 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
 
 def detect_kind(header: stats_core.Header) -> str:
     module_id = (header.module_id or "").lower()
+    if header.module_type == stats_core.ModuleType.XTX:
+        return "xtx"
+    if header.module_type == stats_core.ModuleType.XRX:
+        return "xrx"
     if header.module_type == stats_core.ModuleType.MX:
         return "mx"
     if header.module_type == stats_core.ModuleType.UPRX:

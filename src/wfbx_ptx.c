@@ -129,7 +129,7 @@ static void stats_send_summary(uint32_t dt_ms)
     double rx_rate = (double)summary.rx_bytes * 8.0 / (double)dt_ms;
     double fwd_rate = (double)summary.fwd_bytes * 8.0 / (double)dt_ms;
     preview_len = snprintf(preview_buf, sizeof(preview_buf),
-                           "rx_packets=%u rx_rates=%.1fkbps fwd_packets=%u fwd_rates=%.1fkbps",
+                           "rx_packets=%u rx_rates=%.1f fwd_packets=%u fwd_rates=%.1f",
                            summary.rx_packets, rx_rate,
                            summary.fwd_packets, fwd_rate);
     if (preview_len > 0 && preview_len < (int)sizeof(preview_buf)) {

@@ -1173,7 +1173,7 @@ stats_tick:
 
       if (!build_failed && payload_off + WFBX_STATS_HEADER_SIZE <= WFBX_RX_STATS_MAX_PACKET) {
         wfbx_stats_header_t header;
-        wfbx_stats_header_init(&header, 1, WFBX_MODULE_RX, g_rx_stats_module_id,
+        wfbx_stats_header_init(&header, 1, WFBX_MODULE_XRX, g_rx_stats_module_id,
                                NULL,
                                g_rx_stats_tick_id++, mono_us_raw(), 0, section_count, (uint32_t)payload_off);
         uint8_t header_buf[WFBX_STATS_HEADER_SIZE];
