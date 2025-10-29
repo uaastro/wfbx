@@ -570,6 +570,8 @@ def main(conf):
                         "--tx_id", options['tx_tx_id'],
                         "--link_id", options['tx_link_id'],
                         "--radio_port", options['tx_radio_port'],
+                        "--driver", options['tx_driver'],
+                        "--stat_period", options['tx_stat_period'],
                         "--stat_ip", options['tx_stat_ip'],
                         "--stat_port", options['tx_stat_port'],
                         "--stat_id", section] + wlans
@@ -583,12 +585,14 @@ def main(conf):
             elif section.startswith('rx'):
                 # legacy wfb_rx
                 options = config[section]
+                driver_mode = options.get('rx_driver', defaults.get('rx_driver', 'wfbx'))
                 argv = [wfbx_server_dir + "wfb_rx",
                         "--ip", options['rx_ip'],
                         "--port", options['rx_port'],
                         "--tx_id", options['rx_tx_id'],
                         "--link_id", options['rx_link_id'],
                         "--radio_port", options['rx_radio_port'],
+                        "--driver", driver_mode,
                         "--stat_ip", options['rx_stat_ip'],
                         "--stat_port", options['rx_stat_port'],
                         "--stat_id", section,

@@ -30,6 +30,7 @@
 #include <ctype.h>
 #include <math.h>
 #include <stdbool.h>
+#include <strings.h>
 
 #ifdef __linux__
   #include <endian.h>
@@ -81,6 +82,11 @@ static inline int16_t to_q8(double value) {
 static inline uint32_t clamp_u32(uint64_t v) {
   return (uint32_t)(v > UINT32_MAX ? UINT32_MAX : v);
 }
+
+typedef enum {
+  DRIVER_WFB = 0,
+  DRIVER_WFBX = 1
+} driver_mode_t;
 
 static inline uint64_t mono_us_raw(void)
 {
@@ -300,6 +306,7 @@ static int txf_match(const struct txid_filter* f, uint8_t tx)
 
 static volatile int g_run = 1;
 static void on_sigint(int){ g_run = 0; }
+static int g_warned_short_trailer = 0;
 
 struct cli_cfg {
   int n_if;
@@ -314,6 +321,7 @@ struct cli_cfg {
   int stat_port;
   const char* stat_id;
   char tx_filter_spec[256];
+  driver_mode_t driver_mode;
 };
 
 static void print_help(const char* prog)
@@ -335,6 +343,7 @@ static void print_help(const char* prog)
     "  --link_id <id>      Filter by Link ID (addr3[4]); -1 disables filter (default: 0)\n"
     "  --radio_port <id>   Filter by Radio Port (addr3[5]); -1 disables filter (default: 0)\n"
     "  --stat_period <ms>  Stats period in milliseconds (default: %d)\n"
+    "  --driver <mode>     Driver integration: wfb (no trailer) or wfbx (append/strip mesh trailer) [default: wfbx]\n"
     "  --help              Show this help and exit\n"
     "\nExamples:\n"
     "  sudo %s --tx_id any wlan0\n"
@@ -359,6 +368,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
   cfg->stat_id = "rx";
   strncpy(cfg->tx_filter_spec, "0", sizeof(cfg->tx_filter_spec));
   cfg->tx_filter_spec[sizeof(cfg->tx_filter_spec) - 1] = '\0';
+  cfg->driver_mode = DRIVER_WFBX;
 
   static struct option longopts[] = {
     {"ip",           required_argument, 0, 0},
@@ -370,6 +380,7 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
     {"link_id",      required_argument, 0, 0},
     {"radio_port",   required_argument, 0, 0},
     {"stat_period",  required_argument, 0, 0},
+    {"driver",       required_argument, 0, 0},
     {"help",         no_argument,       0, 0},
     {0,0,0,0}
   };
@@ -396,6 +407,14 @@ static int parse_cli(int argc, char** argv, struct cli_cfg* cfg)
       else if (strcmp(name,"link_id")==0)      cfg->link_id = atoi(val);
       else if (strcmp(name,"radio_port")==0)   cfg->radio_port = atoi(val);
       else if (strcmp(name,"stat_period")==0)  cfg->stat_period_ms = atoi(val);
+      else if (strcmp(name,"driver")==0) {
+        if (strcasecmp(val, "wfbx") == 0) cfg->driver_mode = DRIVER_WFBX;
+        else if (strcasecmp(val, "wfb") == 0) cfg->driver_mode = DRIVER_WFB;
+        else {
+          fprintf(stderr, "Unknown --driver value '%s' (use wfb|wfbx)\n", val);
+          return -1;
+        }
+      }
       else if (strcmp(name,"help")==0) { print_help(argv[0]); exit(0); }
     }
   }
@@ -561,10 +580,14 @@ int main(int argc, char** argv)
   }
   if (n_open == 0) { fprintf(stderr, "No usable interfaces opened.\n"); return 1; }
 
+  const int driver_is_wfbx = (cli.driver_mode == DRIVER_WFBX);
+  g_warned_short_trailer = 0;
+
   fprintf(stderr, "RX: ");
   for (int i=0;i<n_open;i++) fprintf(stderr, "%s%s", cli.ifname[i], (i+1<n_open?", ":""));
-  fprintf(stderr, " -> UDP %s:%d | stats %d ms | filters: TX=%s LINK=%d PORT=%d | stats -> %s:%d id=%s\n",
+  fprintf(stderr, " -> UDP %s:%d | stats %d ms | driver=%s | filters: TX=%s LINK=%d PORT=%d | stats -> %s:%d id=%s\n",
           cli.ip, cli.port, cli.stat_period_ms,
+          driver_is_wfbx ? "wfbx" : "wfb",
           (cli.txf.mode==TXF_ANY?"any":(cli.txf.mode==TXF_INCLUDE?"include":"exclude")),
           cli.link_id, cli.radio_port,
           cli.stat_ip, cli.stat_port, cli.stat_id);
@@ -689,12 +712,22 @@ int main(int argc, char** argv)
             txs->rssi_sum += pkt_rssi;
             txs->rssi_samples++;
           }
-          /* forward once */
-          (void)sendto(us, v.payload, v.payload_len, 0, (struct sockaddr*)&dst, sizeof(dst));
+          size_t forward_len = v.payload_len;
+          if (driver_is_wfbx) {
+            if (forward_len >= WFBX_TRAILER_BYTES) {
+              forward_len -= WFBX_TRAILER_BYTES;
+            } else if (!g_warned_short_trailer) {
+              fprintf(stderr, "[WARN] driver=wfbx but payload shorter than trailer (%zu bytes)\n", forward_len);
+              g_warned_short_trailer = 1;
+            }
+          }
+          if (forward_len > 0) {
+            (void)sendto(us, v.payload, forward_len, 0, (struct sockaddr*)&dst, sizeof(dst));
+          }
           rx_pkts_period += 1;
-          bytes_period   += v.payload_len;
+          bytes_period   += forward_len;
           txs->packets += 1;
-          txs->bytes   += v.payload_len;
+          txs->bytes   += forward_len;
         }
 
         if (fatal_iface_error || !g_run) break;

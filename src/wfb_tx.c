@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <getopt.h>
 #include <stdlib.h>
+#include <strings.h>
 
 #ifdef __linux__
   #include <endian.h>
@@ -38,9 +39,48 @@
 #endif
 
 #include "wfb_defs.h"
+#include "wfbx_stats_core.h"
+#include "wfbx_stats_tx.h"
 
 #define MAX_FRAME        4096
 #define MAX_UDP_PAYLOAD  2000
+#define WFB_TX_STATS_MAX_PACKET 512
+
+typedef enum {
+  DRIVER_WFB = 0,
+  DRIVER_WFBX = 1
+} driver_mode_t;
+
+static inline uint32_t clamp_u32(uint64_t v) {
+  return (v > UINT32_MAX) ? UINT32_MAX : (uint32_t)v;
+}
+
+static inline uint64_t now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+static inline uint64_t mono_us_raw(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+  return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+}
+
+static int append_section(uint8_t* dst, size_t* offset, size_t cap,
+                          uint16_t type, const uint8_t* data, uint16_t length)
+{
+  if (!dst || !offset) return -1;
+  if (*offset + 4u + length > cap) return -1;
+  dst[*offset + 0] = (uint8_t)(type >> 8);
+  dst[*offset + 1] = (uint8_t)(type & 0xFF);
+  dst[*offset + 2] = (uint8_t)(length >> 8);
+  dst[*offset + 3] = (uint8_t)(length & 0xFF);
+  if (length > 0 && data) memcpy(dst + *offset + 4, data, length);
+  *offset += 4u + length;
+  return 0;
+}
+
 
 /* ---- Radiotap TX header (packed) ---- */
 #pragma pack(push,1)
@@ -127,7 +167,8 @@ static size_t build_dot11(uint8_t* out, uint16_t seq, uint8_t group_id, uint8_t 
 static int send_packet(pcap_t* ph,
                        const uint8_t* payload, size_t payload_len, uint16_t seq_num,
                        uint8_t mcs_idx, int gi_short, int bw40, int ldpc, int stbc,
-                       uint8_t group_id, uint8_t tx_id, uint8_t link_id, uint8_t radio_port)
+                       uint8_t group_id, uint8_t tx_id, uint8_t link_id, uint8_t radio_port,
+                       driver_mode_t driver_mode)
 {
   uint8_t frame[MAX_FRAME];
   size_t pos = 0;
@@ -135,10 +176,19 @@ static int send_packet(pcap_t* ph,
   pos += build_radiotap(frame + pos, mcs_idx, gi_short, bw40, ldpc, stbc);
   pos += build_dot11  (frame + pos, seq_num, group_id, tx_id, link_id, radio_port);
 
+  const size_t trailer_len = (driver_mode == DRIVER_WFBX) ? (size_t)WFBX_TRAILER_BYTES : 0u;
+  if (pos + payload_len + trailer_len > sizeof(frame)) return -1;
+
   if (payload_len > 0) {
-    if (pos + payload_len > sizeof(frame)) return -1;
     memcpy(frame + pos, payload, payload_len);
     pos += payload_len;
+  }
+
+  if (trailer_len > 0) {
+    struct wfbx_mesh_trailer tr;
+    memset(&tr, 0, sizeof(tr));
+    memcpy(frame + pos, &tr, trailer_len);
+    pos += trailer_len;
   }
 
   int ret = pcap_inject(ph, frame, (int)pos);
@@ -158,6 +208,8 @@ int main(int argc, char** argv) {
   const char* stat_ip = "127.0.0.1";
   int stat_port = 9601;
   const char* stat_id = "tx";
+  int stat_period_ms = 1000;
+  driver_mode_t driver_mode = DRIVER_WFBX;
 
   static struct option longopts[] = {
     {"ip",         required_argument, 0, 0},
@@ -174,6 +226,8 @@ int main(int argc, char** argv) {
     {"stat_ip",    required_argument, 0, 0},
     {"stat_port",  required_argument, 0, 0},
     {"stat_id",    required_argument, 0, 0},
+    {"stat_period",required_argument, 0, 0},
+    {"driver",     required_argument, 0, 0},
     {0,0,0,0}
   };
 
@@ -206,6 +260,15 @@ int main(int argc, char** argv) {
       else if (strcmp(name,"stat_ip")==0)  stat_ip = val;
       else if (strcmp(name,"stat_port")==0) stat_port = atoi(val);
       else if (strcmp(name,"stat_id")==0)  stat_id = val;
+      else if (strcmp(name,"stat_period")==0) stat_period_ms = atoi(val);
+      else if (strcmp(name,"driver")==0) {
+        if (strcasecmp(val, "wfbx") == 0) driver_mode = DRIVER_WFBX;
+        else if (strcasecmp(val, "wfb") == 0) driver_mode = DRIVER_WFB;
+        else {
+          fprintf(stderr, "Unknown --driver value '%s' (use wfb|wfbx)\n", val);
+          return 1;
+        }
+      }
     }
   }
 
@@ -213,7 +276,9 @@ int main(int argc, char** argv) {
     fprintf(stderr,
             "Usage: sudo %s [--ip 0.0.0.0] [--port 5600] [--mcs_idx N] [--gi short|long] [--bw 20|40]\n"
             "                [--ldpc 0|1] [--stbc 0..3] [--group_id G] [--tx_id T] [--link_id L] [--radio_port P]\n"
-            "                [--stat_ip 127.0.0.1] [--stat_port 9601] [--stat_id tx] <wlan_iface>\n",
+            "                [--stat_ip 127.0.0.1] [--stat_port 9601] [--stat_id tx] [--stat_period 1000]\n"
+            "                [--driver wfb|wfbx]\n"
+            "                <wlan_iface>\n",
             argv[0]);
     return 1;
   }
@@ -228,6 +293,30 @@ int main(int argc, char** argv) {
   sa.sin_port   = htons(port);
   if (!inet_aton(ip, &sa.sin_addr)) { fprintf(stderr, "inet_aton failed for %s\n", ip); return 1; }
   if (bind(us, (struct sockaddr*)&sa, sizeof(sa)) < 0) { perror("bind"); return 1; }
+
+  if (stat_period_ms <= 0) stat_period_ms = 1000;
+
+  int stats_enabled = (stat_period_ms > 0 && stat_port > 0);
+  int stat_sock = -1;
+  struct sockaddr_in stat_addr;
+  memset(&stat_addr, 0, sizeof(stat_addr));
+  uint32_t stat_tick_id = 0;
+  if (stats_enabled) {
+    stat_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (stat_sock < 0) {
+      perror("stat socket");
+      stats_enabled = 0;
+    } else {
+      stat_addr.sin_family = AF_INET;
+      stat_addr.sin_port = htons((uint16_t)stat_port);
+      if (inet_pton(AF_INET, stat_ip, &stat_addr.sin_addr) != 1) {
+        fprintf(stderr, "[STATS] invalid stat_ip '%s' — TX stats disabled\n", stat_ip);
+        close(stat_sock);
+        stat_sock = -1;
+        stats_enabled = 0;
+      }
+    }
+  }
 
   /* open pcap on iface (monitor mode expected) */
   char errbuf[PCAP_ERRBUF_SIZE] = {0};
@@ -247,31 +336,141 @@ int main(int argc, char** argv) {
 
   signal(SIGINT, on_sigint);
 
-  fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d | stats -> %s:%d id=%s\n",
+  fprintf(stderr, "UDP %s:%d -> WLAN %s | MCS=%d GI=%s BW=%s LDPC=%d STBC=%d | G=%d TX=%d L=%d P=%d | driver=%s | stats -> %s:%d id=%s period=%d ms%s\n",
           ip, port, iface, mcs_idx, gi_short?"short":"long", bw40?"40":"20",
           ldpc, stbc, group_id, tx_id, link_id, radio_port,
-          stat_ip, stat_port, stat_id);
+          (driver_mode == DRIVER_WFBX) ? "wfbx" : "wfb",
+          stat_ip, stat_port, stat_id, stat_period_ms,
+          stats_enabled ? "" : " (disabled)");
 
   uint8_t buf[MAX_UDP_PAYLOAD];
   uint16_t seq = 0;
+  uint64_t rx_pkts_period = 0;
+  uint64_t rx_bytes_period = 0;
+  uint64_t tx_pkts_period = 0;
+  uint64_t tx_bytes_period = 0;
+  uint64_t t_stats = now_ms();
 
   while (g_run) {
     ssize_t n = recv(us, buf, sizeof(buf), 0);
     if (n < 0) { if (errno==EINTR) continue; perror("recv"); break; }
     if (n == 0) continue;
 
+    rx_pkts_period += 1;
+    rx_bytes_period += (uint64_t)n;
+
     int ret = send_packet(ph, buf, (size_t)n, seq,
                           (uint8_t)mcs_idx, gi_short, bw40, ldpc, stbc,
-                          (uint8_t)group_id, (uint8_t)tx_id, (uint8_t)link_id, (uint8_t)radio_port);
+                          (uint8_t)group_id, (uint8_t)tx_id, (uint8_t)link_id, (uint8_t)radio_port,
+                          driver_mode);
     if (ret < 0) {
       const char* perr = pcap_geterr(ph);
       fprintf(stderr, "pcap_inject(%s) failed: %s\n", iface, perr ? perr : "unknown error");
       break;
     }
+    if (ret > 0) {
+      tx_pkts_period += 1;
+      tx_bytes_period += (uint64_t)ret;
+    }
     seq = (uint16_t)((seq + 1) & 0x0fff);
+
+    if (stats_enabled) {
+      uint64_t t_now = now_ms();
+      if (t_now - t_stats >= (uint64_t)stat_period_ms) {
+        uint64_t dt_ms64 = t_now - t_stats;
+        if (dt_ms64 == 0) dt_ms64 = (uint64_t)stat_period_ms;
+
+        double rx_rate_kbps = (dt_ms64 > 0) ? ((double)rx_bytes_period * 8.0) / (double)dt_ms64 : 0.0;
+        double tx_rate_kbps = (dt_ms64 > 0) ? ((double)tx_bytes_period * 8.0) / (double)dt_ms64 : 0.0;
+
+        unsigned __int128 rx_num = (unsigned __int128)rx_bytes_period * 80u;
+        unsigned __int128 tx_num = (unsigned __int128)tx_bytes_period * 80u;
+        uint64_t rx_rate_x10 = (dt_ms64 > 0) ? (uint64_t)(rx_num / dt_ms64) : 0;
+        uint64_t tx_rate_x10 = (dt_ms64 > 0) ? (uint64_t)(tx_num / dt_ms64) : 0;
+        if (rx_rate_x10 > UINT32_MAX) rx_rate_x10 = UINT32_MAX;
+        if (tx_rate_x10 > UINT32_MAX) tx_rate_x10 = UINT32_MAX;
+
+        fprintf(stderr,
+                "[STATS] dt=%llu ms | rx_pkts=%llu rate=%.1f kbps | tx_pkts=%llu rate=%.1f kbps\n",
+                (unsigned long long)dt_ms64,
+                (unsigned long long)rx_pkts_period, rx_rate_kbps,
+                (unsigned long long)tx_pkts_period, tx_rate_kbps);
+
+        wfbx_tx_summary_t summary = {
+          .dt_ms = clamp_u32(dt_ms64),
+          .udp_rx_packets = clamp_u32(rx_pkts_period),
+          .udp_rx_kbps_x10 = (uint32_t)rx_rate_x10,
+          .sent_packets = clamp_u32(tx_pkts_period),
+          .sent_kbps_x10 = (uint32_t)tx_rate_x10,
+          .drop_overflow = 0,
+          .reserved0 = 0,
+          .reserved1 = 0,
+        };
+
+        uint8_t summary_buf[sizeof(wfbx_tx_summary_t)];
+        int summary_len = wfbx_tx_summary_pack(summary_buf, sizeof(summary_buf), &summary);
+
+        if (summary_len > 0) {
+          uint8_t payload[WFB_TX_STATS_MAX_PACKET - WFBX_STATS_HEADER_SIZE];
+          size_t payload_off = 0;
+          uint16_t section_count = 0;
+          if (append_section(payload, &payload_off, sizeof(payload),
+                             WFBX_TX_SECTION_SUMMARY,
+                             summary_buf, (uint16_t)summary_len) == 0) {
+            section_count++;
+
+            char preview_buf[128];
+            int preview_len = snprintf(preview_buf, sizeof(preview_buf),
+                                       "pks_rx=%llu rate_rx=%.1f pks_tx=%llu rate_tx=%.1f",
+                                       (unsigned long long)rx_pkts_period,
+                                       rx_rate_kbps,
+                                       (unsigned long long)tx_pkts_period,
+                                       tx_rate_kbps);
+            if (preview_len > 0 && preview_len < (int)sizeof(preview_buf)) {
+              if (append_section(payload, &payload_off, sizeof(payload),
+                                 WFBX_SECTION_TEXT_PREVIEW,
+                                 (const uint8_t*)preview_buf,
+                                 (uint16_t)preview_len) == 0) {
+                section_count++;
+              }
+            }
+
+            uint8_t packet[WFB_TX_STATS_MAX_PACKET];
+            wfbx_stats_header_t hdr;
+            if (wfbx_stats_header_init(&hdr,
+                                       1,
+                                       WFBX_MODULE_TX,
+                                       stat_id,
+                                       NULL,
+                                       stat_tick_id++,
+                                       mono_us_raw(),
+                                       0,
+                                       section_count,
+                                       (uint32_t)payload_off) == 0) {
+              if (wfbx_stats_header_pack(packet, sizeof(packet), &hdr) == 0) {
+                memcpy(packet + WFBX_STATS_HEADER_SIZE, payload, payload_off);
+                size_t total_len = WFBX_STATS_HEADER_SIZE + payload_off;
+                hdr.crc32 = wfbx_stats_crc32(packet, total_len);
+                if (wfbx_stats_header_pack(packet, sizeof(packet), &hdr) == 0) {
+                  (void)sendto(stat_sock, packet, total_len, 0,
+                               (struct sockaddr*)&stat_addr, sizeof(stat_addr));
+                }
+              }
+            }
+          }
+        }
+
+        t_stats = t_now;
+        rx_pkts_period = 0;
+        rx_bytes_period = 0;
+        tx_pkts_period = 0;
+        tx_bytes_period = 0;
+      }
+    }
   }
 
   if (ph) pcap_close(ph);
   close(us);
+  if (stat_sock >= 0) close(stat_sock);
   return 0;
 }

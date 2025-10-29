@@ -23,7 +23,11 @@ echo "[BUILD] wfbx_ptx"
 $CC $CFLAGS -o ./bin/wfbx_ptx ./src/wfbx_ptx.c ./src/wfbx_stats_core.c ./src/wfbx_stats_ptx.c $LDFLAGS_COMMON -lm
 
 echo "[BUILD] legacy wfb_tx"
-$CC $CFLAGS -o ./bin/wfb_tx ./src/wfb_tx.c $LDFLAGS_COMMON -lpcap
+$CC $CFLAGS -o ./bin/wfb_tx \
+  ./src/wfb_tx.c \
+  ./src/wfbx_stats_core.c \
+  ./src/wfbx_stats_tx.c \
+  $LDFLAGS_COMMON -lpcap
 
 echo "[BUILD] legacy wfb_rx"
 $CC $CFLAGS -o ./bin/wfb_rx \
