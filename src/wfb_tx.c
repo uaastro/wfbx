@@ -19,6 +19,7 @@
 #include <getopt.h>
 #include <stdlib.h>
 #include <strings.h>
+#include <time.h>
 
 #ifdef __linux__
   #include <endian.h>
@@ -54,6 +55,13 @@ typedef enum {
 static inline uint32_t clamp_u32(uint64_t v) {
   return (v > UINT32_MAX) ? UINT32_MAX : (uint32_t)v;
 }
+
+#ifndef CLOCK_MONOTONIC
+#define CLOCK_MONOTONIC CLOCK_REALTIME
+#endif
+#ifndef CLOCK_MONOTONIC_RAW
+#define CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
+#endif
 
 static inline uint64_t now_ms(void) {
   struct timespec ts;
