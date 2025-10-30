@@ -142,13 +142,20 @@ def main(conf):
                 channel = options['channel']
                 bandwidth = options['bandwidth']
                 bw_pf = options['bw_pf']
-                # Interface setup (keep shell=True as in the original variant)
-                for wlan in wlans:
-                    subprocess.run(f"ifconfig {wlan} down", shell=True, check=True)
-                    subprocess.run(f"iw dev {wlan} set monitor otherbss", shell=True, check=True)
-                    subprocess.run(f"iw reg set US", shell=True, check=True)
-                    subprocess.run(f"ifconfig {wlan} up", shell=True, check=True)
-                    subprocess.run(f"iw dev {wlan} set channel {channel} HT{bandwidth}{bw_pf}", shell=True, check=True)
+                setup_mode = options.get('wlan_setup_mode', defaults.get('wlan_setup_mode', 'auto')).strip().lower()
+                if setup_mode not in {"auto", "manual"}:
+                    logging.warning("[wlan] invalid wlan_setup_mode '%s', fallback to auto", setup_mode)
+                    setup_mode = "auto"
+
+                if setup_mode == "auto":
+                    for wlan in wlans:
+                        subprocess.run(f"ifconfig {wlan} down", shell=True, check=True)
+                        subprocess.run(f"iw dev {wlan} set monitor otherbss", shell=True, check=True)
+                        subprocess.run(f"iw reg set US", shell=True, check=True)
+                        subprocess.run(f"ifconfig {wlan} up", shell=True, check=True)
+                        subprocess.run(f"iw dev {wlan} set channel {channel} HT{bandwidth}{bw_pf}", shell=True, check=True)
+                else:
+                    logging.info("[wlan] setup skipped for %s (manual mode)", ",".join(wlans))
 
             elif section.startswith('udp_tx'):
                 options = config[section]
