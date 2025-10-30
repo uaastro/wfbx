@@ -26,7 +26,7 @@ echo "[BUILD] legacy wfb_tx"
 $CC $CFLAGS -o ./bin/wfb_tx \
   ./src/wfb_tx.c \
   ./src/wfbx_stats_core.c \
-  ./src/wfbx_stats_tx.c \
+  ./src/wfb_stats_tx_legacy.c \
   $LDFLAGS_COMMON -lpcap
 
 echo "[BUILD] legacy wfb_rx"

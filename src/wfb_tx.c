@@ -40,7 +40,7 @@
 
 #include "wfb_defs.h"
 #include "wfbx_stats_core.h"
-#include "wfbx_stats_tx.h"
+#include "wfb_stats_tx_legacy.h"
 
 #define MAX_FRAME        4096
 #define MAX_UDP_PAYLOAD  2000
@@ -396,7 +396,7 @@ int main(int argc, char** argv) {
                 (unsigned long long)rx_pkts_period, rx_rate_kbps,
                 (unsigned long long)tx_pkts_period, tx_rate_kbps);
 
-        wfbx_tx_summary_t summary = {
+        wfb_stats_tx_summary_t summary = {
           .dt_ms = clamp_u32(dt_ms64),
           .udp_rx_packets = clamp_u32(rx_pkts_period),
           .udp_rx_kbps_x10 = (uint32_t)rx_rate_x10,
@@ -407,15 +407,15 @@ int main(int argc, char** argv) {
           .reserved1 = 0,
         };
 
-        uint8_t summary_buf[sizeof(wfbx_tx_summary_t)];
-        int summary_len = wfbx_tx_summary_pack(summary_buf, sizeof(summary_buf), &summary);
+        uint8_t summary_buf[sizeof(wfb_stats_tx_summary_t)];
+        int summary_len = wfb_stats_tx_summary_pack(summary_buf, sizeof(summary_buf), &summary);
 
         if (summary_len > 0) {
           uint8_t payload[WFB_TX_STATS_MAX_PACKET - WFBX_STATS_HEADER_SIZE];
           size_t payload_off = 0;
           uint16_t section_count = 0;
           if (append_section(payload, &payload_off, sizeof(payload),
-                             WFBX_TX_SECTION_SUMMARY,
+                             WFB_STATS_TX_SECTION_SUMMARY,
                              summary_buf, (uint16_t)summary_len) == 0) {
             section_count++;
 

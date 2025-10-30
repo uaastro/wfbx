@@ -22,8 +22,9 @@ from rich.text import Text
 from wfbxlib.stats import core as stats_core
 from wfbxlib.stats import mx as stats_mx
 from wfbxlib.stats import tx as stats_tx
+from wfbxlib.stats import xtx as stats_xtx
 from wfbxlib.stats import rx as stats_rx
-from wfbxlib.stats import legacy_rx as stats_legacy_rx
+from wfbxlib.stats import xrx as stats_xrx
 from wfbxlib.stats import ptx as stats_ptx
 
 console = Console()
@@ -41,10 +42,10 @@ class ModuleRecord:
     if_entries: List[stats_mx.IfDetail]
     global_debug: Optional[stats_mx.GlobalDebug]
     mx_filter: Optional[stats_mx.FilterInfo]
-    tx_summary: Optional[stats_tx.Summary]
-    tx_queue: Optional[stats_tx.QueueStats]
-    tx_slot: Optional[stats_tx.SlotStats]
-    tx_epoch: Optional[stats_tx.EpochStats]
+    tx_summary: Optional[Any]
+    tx_queue: Optional[stats_xtx.QueueStats]
+    tx_slot: Optional[stats_xtx.SlotStats]
+    tx_epoch: Optional[stats_xtx.EpochStats]
     rx_summary: Optional[Any]
     rx_tx_entries: List[Any]
     rx_if_entries: List[Any]
@@ -83,14 +84,14 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
     if_entries: List[stats_mx.IfDetail] = []
     global_debug: Optional[stats_mx.GlobalDebug] = None
     mx_filter: Optional[stats_mx.FilterInfo] = None
-    tx_summary: Optional[stats_tx.Summary] = None
-    tx_queue: Optional[stats_tx.QueueStats] = None
-    tx_slot: Optional[stats_tx.SlotStats] = None
-    tx_epoch: Optional[stats_tx.EpochStats] = None
-    rx_summary: Optional[stats_rx.Summary] = None
-    rx_tx_entries: List[stats_rx.TxSummary] = []
-    rx_if_entries: List[stats_rx.IfDetail] = []
-    rx_filter: Optional[stats_rx.FilterInfo] = None
+    tx_summary: Optional[Any] = None
+    tx_queue: Optional[stats_xtx.QueueStats] = None
+    tx_slot: Optional[stats_xtx.SlotStats] = None
+    tx_epoch: Optional[stats_xtx.EpochStats] = None
+    rx_summary: Optional[Any] = None
+    rx_tx_entries: List[Any] = []
+    rx_if_entries: List[Any] = []
+    rx_filter: Optional[Any] = None
     ptx_summary: Optional[stats_ptx.Summary] = None
 
     for section_type, payload in sections:
@@ -126,53 +127,52 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
                     mx_filter = stats_mx.FilterInfo.unpack(payload)
                 except ValueError:
                     mx_filter = None
-        elif header.module_type in (stats_core.ModuleType.RX, stats_core.ModuleType.XRX):
-            if header.module_type == stats_core.ModuleType.XRX:
+        elif header.module_type == stats_core.ModuleType.RX:
+            try:
+                rx_type = stats_rx.SectionType(section_type)
+            except ValueError:
+                continue
+            if rx_type == stats_rx.SectionType.SUMMARY:
                 try:
-                    rx_type = stats_rx.SectionType(section_type)
+                    rx_summary = stats_rx.Summary.unpack(payload)
                 except ValueError:
-                    continue
-                if rx_type == stats_rx.SectionType.SUMMARY:
-                    try:
-                        rx_summary = stats_rx.Summary.unpack(payload)
-                    except ValueError:
-                        rx_summary = None
-                elif rx_type == stats_rx.SectionType.TX_SUMMARY:
-                    try:
-                        rx_tx_entries = stats_rx.unpack_tx_summary_section(payload)
-                    except ValueError:
-                        rx_tx_entries = []
-                elif rx_type == stats_rx.SectionType.IF_DETAIL:
-                    try:
-                        rx_if_entries = stats_rx.unpack_if_detail_section(payload)
-                    except ValueError:
-                        rx_if_entries = []
-                elif rx_type == stats_rx.SectionType.FILTERS:
-                    try:
-                        rx_filter = stats_rx.unpack_filter_section(payload)
-                    except ValueError:
-                        rx_filter = None
-            else:
+                    rx_summary = None
+            elif rx_type == stats_rx.SectionType.TX_SUMMARY:
                 try:
-                    rx_type = stats_legacy_rx.SectionType(section_type)
+                    rx_tx_entries = stats_rx.unpack_tx_summary_section(payload)
                 except ValueError:
-                    continue
-                if rx_type == stats_legacy_rx.SectionType.SUMMARY:
-                    try:
-                        rx_summary = stats_legacy_rx.Summary.unpack(payload)
-                    except ValueError:
-                        rx_summary = None
-                elif rx_type == stats_legacy_rx.SectionType.TX_SUMMARY:
-                    try:
-                        rx_tx_entries = stats_legacy_rx.unpack_tx_summary_section(payload)
-                    except ValueError:
-                        rx_tx_entries = []
-                elif rx_type == stats_legacy_rx.SectionType.FILTERS:
-                    try:
-                        rx_filter = stats_legacy_rx.FilterInfo.unpack(payload)
-                    except ValueError:
-                        rx_filter = None
-        elif header.module_type in (stats_core.ModuleType.TX, stats_core.ModuleType.XTX):
+                    rx_tx_entries = []
+            elif rx_type == stats_rx.SectionType.FILTERS:
+                try:
+                    rx_filter = stats_rx.FilterInfo.unpack(payload)
+                except ValueError:
+                    rx_filter = None
+        elif header.module_type == stats_core.ModuleType.XRX:
+            try:
+                rx_type = stats_xrx.SectionType(section_type)
+            except ValueError:
+                continue
+            if rx_type == stats_xrx.SectionType.SUMMARY:
+                try:
+                    rx_summary = stats_xrx.Summary.unpack(payload)
+                except ValueError:
+                    rx_summary = None
+            elif rx_type == stats_xrx.SectionType.TX_SUMMARY:
+                try:
+                    rx_tx_entries = stats_xrx.unpack_tx_summary_section(payload)
+                except ValueError:
+                    rx_tx_entries = []
+            elif rx_type == stats_xrx.SectionType.IF_DETAIL:
+                try:
+                    rx_if_entries = stats_xrx.unpack_if_detail_section(payload)
+                except ValueError:
+                    rx_if_entries = []
+            elif rx_type == stats_xrx.SectionType.FILTERS:
+                try:
+                    rx_filter = stats_xrx.unpack_filter_section(payload)
+                except ValueError:
+                    rx_filter = None
+        elif header.module_type == stats_core.ModuleType.TX:
             try:
                 tx_type = stats_tx.SectionType(section_type)
             except ValueError:
@@ -182,19 +182,29 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
                     tx_summary = stats_tx.Summary.unpack(payload)
                 except ValueError:
                     tx_summary = None
-            elif tx_type == stats_tx.SectionType.QUEUE:
+        elif header.module_type == stats_core.ModuleType.XTX:
+            try:
+                xtx_type = stats_xtx.SectionType(section_type)
+            except ValueError:
+                continue
+            if xtx_type == stats_xtx.SectionType.SUMMARY:
                 try:
-                    tx_queue = stats_tx.QueueStats.unpack(payload)
+                    tx_summary = stats_xtx.Summary.unpack(payload)
+                except ValueError:
+                    tx_summary = None
+            elif xtx_type == stats_xtx.SectionType.QUEUE:
+                try:
+                    tx_queue = stats_xtx.QueueStats.unpack(payload)
                 except ValueError:
                     tx_queue = None
-            elif tx_type == stats_tx.SectionType.SLOT:
+            elif xtx_type == stats_xtx.SectionType.SLOT:
                 try:
-                    tx_slot = stats_tx.SlotStats.unpack(payload)
+                    tx_slot = stats_xtx.SlotStats.unpack(payload)
                 except ValueError:
                     tx_slot = None
-            elif tx_type == stats_tx.SectionType.EPOCH:
+            elif xtx_type == stats_xtx.SectionType.EPOCH:
                 try:
-                    tx_epoch = stats_tx.EpochStats.unpack(payload)
+                    tx_epoch = stats_xtx.EpochStats.unpack(payload)
                 except ValueError:
                     tx_epoch = None
         elif header.module_type == stats_core.ModuleType.PTX:
@@ -224,7 +234,6 @@ def parse_sections(header: stats_core.Header, sections: List[Tuple[int, bytes]])
 
 
 def detect_kind(header: stats_core.Header) -> str:
-    module_id = (header.module_id or "").lower()
     if header.module_type == stats_core.ModuleType.XTX:
         return "xtx"
     if header.module_type == stats_core.ModuleType.XRX:
@@ -238,14 +247,8 @@ def detect_kind(header: stats_core.Header) -> str:
     if header.module_type == stats_core.ModuleType.PTX:
         return "ptx"
     if header.module_type == stats_core.ModuleType.TX:
-        if module_id.startswith("xtx"):
-            return "xtx"
         return "tx"
     if header.module_type == stats_core.ModuleType.RX:
-        if module_id.startswith("xrx"):
-            return "xrx"
-        if module_id.startswith("rxx"):
-            return "rxx"
         return "rx"
     return "unknown"
 
@@ -541,15 +544,30 @@ def _two_row_table(labels: List[str], values: List[str], *, style_label: str = "
 def render_tx(record: ModuleRecord) -> Group:
     blocks: List = []
 
-    metrics_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
-    columns = 5
-    for _ in range(columns):
-        metrics_table.add_column()
-    metrics_added = False
-    missing_summary = False
+    summary = record.tx_summary
+    if record.kind == "tx":
+        table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+        labels = ["pks_rx", "rate_rx(kbps)", "pks_tx", "rate_tx(kbps)"]
+        table.add_row(*[Text(label, style="cyan") for label in labels])
+        if summary is not None:
+            values = [
+                f"{summary.udp_rx_packets}",
+                f"{summary.udp_rx_kbps_x10 / 10.0:.1f}",
+                f"{summary.sent_packets}",
+                f"{summary.sent_kbps_x10 / 10.0:.1f}",
+            ]
+        else:
+            values = ["n/a", "n/a", "n/a", "n/a"]
+        table.add_row(*values)
+        blocks.append(table)
+        return Group(*blocks)
 
-    if record.tx_summary is not None:
-        ts = record.tx_summary
+    metrics_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+    for _ in range(5):
+        metrics_table.add_column()
+
+    metrics_added = False
+    if summary is not None:
         labels = [
             "udp rx pkts",
             "udp rx kbps",
@@ -558,17 +576,15 @@ def render_tx(record: ModuleRecord) -> Group:
             "drop overflow",
         ]
         values = [
-            f"{ts.udp_rx_packets}",
-            f"{ts.udp_rx_kbps_x10 / 10.0:.1f}",
-            f"{ts.sent_packets}",
-            f"{ts.sent_kbps_x10 / 10.0:.1f}",
-            f"{ts.drop_overflow}",
+            f"{summary.udp_rx_packets}",
+            f"{summary.udp_rx_kbps_x10 / 10.0:.1f}",
+            f"{summary.sent_packets}",
+            f"{summary.sent_kbps_x10 / 10.0:.1f}",
+            f"{summary.drop_overflow}",
         ]
         metrics_table.add_row(*[Text(lbl, style="cyan") for lbl in labels])
         metrics_table.add_row(*[Text(val, style="bright_white") for val in values])
         metrics_added = True
-    else:
-        missing_summary = True
 
     if record.tx_queue is not None:
         tq = record.tx_queue
@@ -588,7 +604,7 @@ def render_tx(record: ModuleRecord) -> Group:
 
     if metrics_added:
         blocks.append(metrics_table)
-    if missing_summary:
+    else:
         blocks.append(Text("TX summary unavailable", style="dim"))
 
     if record.tx_epoch is not None:
@@ -876,7 +892,7 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
-    elif record.kind in {"rx", "xrx", "rxx"}:
+    elif record.kind in {"rx", "xrx"}:
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
@@ -893,11 +909,15 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         body = render_uprx(record)
     elif record.kind == "ufrx":
         body = render_ufrx(record)
-    elif record.kind in {"rx", "xrx", "rxx"}:
+    elif record.kind == "rx":
+        body = render_rx(record)
+    elif record.kind == "xrx":
         body = render_rx(record)
     elif record.kind == "ptx":
         body = render_ptx(record)
-    elif record.kind in {"tx", "xtx"}:
+    elif record.kind == "tx":
+        body = render_tx(record)
+    elif record.kind == "xtx":
         body = render_tx(record)
     else:
         body = render_generic(record, "stat")

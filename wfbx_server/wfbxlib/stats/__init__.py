@@ -1,15 +1,17 @@
 from . import core
 from . import mx
 from . import tx
+from . import xtx
 from . import rx
-from . import legacy_rx
+from . import xrx
 from . import ptx
 
 __all__ = [
     "core",
     "mx",
     "tx",
+    "xtx",
     "rx",
-    "legacy_rx",
+    "xrx",
     "ptx",
 ]
