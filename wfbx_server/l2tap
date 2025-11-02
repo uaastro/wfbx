@@ -179,7 +179,10 @@ def main(
     stat_tick = 0
     tx_pkts = 0
     rx_pkts = 0
-    tap_write_drops = udp_send_drops = 0
+    tx_bytes = 0
+    rx_bytes = 0
+    tap_write_drops = 0
+    udp_send_drops = 0
 
     read_buf = max(2000, (mtu if mtu > 0 else 2000) + 64)
 
@@ -191,20 +194,21 @@ def main(
             return
 
         dt_ms = max(1, int((now - period_start) * 1000))
-        rate_tx = int((tx_pkts * 1000) / dt_ms) if dt_ms else 0
-        rate_rx = int((rx_pkts * 1000) / dt_ms) if dt_ms else 0
+        period_ms = dt_ms
+        rate_tx_kbps = int((tx_bytes * 8 * 1000) / period_ms) if period_ms > 0 else 0
+        rate_rx_kbps = int((rx_bytes * 8 * 1000) / period_ms) if period_ms > 0 else 0
         summary = stats_core.Summary(
             dt_ms=dt_ms,
             packets_total=tx_pkts,
-            bytes_total=rx_pkts,
-            ctrl_epoch_sent=rate_tx,
-            iface_count=rate_rx,
+            bytes_total=tx_bytes,
+            ctrl_epoch_sent=rate_tx_kbps,
+            iface_count=rate_rx_kbps,
             tx_count=0,
             flags=0,
         )
         preview = (
             f"tap={tap_actual} pks_tx={tx_pkts} pks_rx={rx_pkts} "
-            f"rate_tx={rate_tx}pps rate_rx={rate_rx}pps "
+            f"rate_tx={rate_tx_kbps}kbps rate_rx={rate_rx_kbps}kbps "
             f"drops_tap={tap_write_drops} drops_udp={udp_send_drops}"
         ).encode("utf-8")
         sections = stats_core.make_sections([
