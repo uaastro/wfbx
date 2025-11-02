@@ -246,6 +246,8 @@ def detect_kind(header: stats_core.Header) -> str:
         return "ufrx"
     if header.module_type == stats_core.ModuleType.PTX:
         return "ptx"
+    if header.module_type == stats_core.ModuleType.L2_TAP2_TAP:
+        return "l2tap"
     if header.module_type == stats_core.ModuleType.TX:
         return "tx"
     if header.module_type == stats_core.ModuleType.RX:
@@ -750,6 +752,24 @@ def render_rx(record: ModuleRecord) -> Group:
     return Group(*blocks)
 
 
+
+
+def render_l2tap(record: ModuleRecord) -> Group:
+    summary = record.summary
+    labels = ["pks_tx", "rate_tx (kbps)", "pks_rx", "rate_rx (kbps)"]
+    if summary is not None:
+        values = [
+            str(summary.packets_total),
+            f"{summary.ctrl_epoch_sent}",
+            str(summary.bytes_total),
+            f"{summary.iface_count}",
+        ]
+    else:
+        values = ["n/a", "n/a", "n/a", "n/a"]
+    table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+    table.add_row(*[Text(label, style="cyan") for label in labels])
+    table.add_row(*values)
+    return Group(table)
 def render_ptx(record: ModuleRecord) -> Group:
     blocks: List = []
     summary = record.ptx_summary
@@ -915,6 +935,8 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         body = render_rx(record)
     elif record.kind == "ptx":
         body = render_ptx(record)
+    elif record.kind == "l2tap":
+        body = render_l2tap(record)
     elif record.kind == "tx":
         body = render_tx(record)
     elif record.kind == "xtx":
