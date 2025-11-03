@@ -218,21 +218,20 @@ def main(
 
         dt_ms = max(1, int((now - period_start) * 1000))
         period_ms = dt_ms
-        rate_tx_kbps = int((tx_bytes * 8 * 1000) / period_ms) if period_ms > 0 else 0
-        rate_rx_kbps = int((rx_bytes * 8 * 1000) / period_ms) if period_ms > 0 else 0
+        rate_tx_kbps = (tx_bytes * 8) / (period_ms if period_ms > 0 else 1) / 1000.0
+        rate_rx_kbps = (rx_bytes * 8) / (period_ms if period_ms > 0 else 1) / 1000.0
         summary = stats_core.Summary(
             dt_ms=dt_ms,
             packets_total=tx_pkts,
             bytes_total=rx_pkts,
-            ctrl_epoch_sent=rate_tx_kbps,
-            iface_count=rate_rx_kbps,
-            tx_count=tap_write_drops,
-            flags=udp_send_drops,
+            ctrl_epoch_sent=int(rate_tx_kbps * 1000),
+            iface_count=int(rate_rx_kbps * 1000),
+            tx_count=0,
+            flags=0,
         )
         preview = (
             f"tap={tap_actual} pkts_tx={tx_pkts} pkts_rx={rx_pkts} "
-            f"rate_tx={rate_tx_kbps}kbps rate_rx={rate_rx_kbps}kbps "
-            f"drops_tap={tap_write_drops} drops_udp={udp_send_drops}"
+            f"rate_tx={rate_tx_kbps:.1f}kbps rate_rx={rate_rx_kbps:.1f}kbps"
         ).encode("utf-8")
         sections = stats_core.make_sections([
             (int(stats_core.SectionType.SUMMARY), summary.pack()),

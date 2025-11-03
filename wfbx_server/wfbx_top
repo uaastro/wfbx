@@ -769,13 +769,7 @@ def render_l2tap(record: ModuleRecord) -> Group:
     table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
     table.add_row(*[Text(label, style="cyan") for label in labels])
     table.add_row(*values)
-    blocks = [table]
-    if summary is not None:
-        drops_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
-        drops_table.add_row(Text("drops_tap", style="cyan"), Text(str(summary.tx_count), style="bright_black"))
-        drops_table.add_row(Text("drops_udp", style="cyan"), Text(str(summary.flags), style="bright_black"))
-        blocks.append(drops_table)
-    return Group(*blocks)
+    return Group(table)
 def render_ptx(record: ModuleRecord) -> Group:
     blocks: List = []
     summary = record.ptx_summary
