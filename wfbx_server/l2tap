@@ -2,6 +2,7 @@
 
 import atexit
 import os
+import secrets
 import selectors
 import signal
 import socket
@@ -105,11 +106,17 @@ def main(
 
     print(f"[l2tap] TAP: {tap_actual} (fd={tap_fd})")
 
+    tap_mac_bytes = bytearray(secrets.token_bytes(6))
+    tap_mac_bytes[0] = (tap_mac_bytes[0] | 0x02) & 0xFE
+    tap_mac = ":".join(f"{octet:02x}" for octet in tap_mac_bytes)
+    print(f"[l2tap] TAP MAC: {tap_mac}")
+
     try:
         taplib.configure_iface(
             tap_actual,
             mtu=mtu if mtu > 0 else None,
             txqueuelen=None,
+            mac=tap_mac,
             up=True,
         )
     except taplib.TapError as exc:

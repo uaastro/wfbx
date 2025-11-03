@@ -85,6 +85,7 @@ def configure_iface(
     *,
     mtu: Optional[int] = None,
     txqueuelen: Optional[int] = None,
+    mac: Optional[str] = None,
     up: bool = True,
 ) -> None:
     """Configure interface parameters via `ip link`."""
@@ -93,6 +94,8 @@ def configure_iface(
         cmds += [["ip", "link", "set", "dev", name, "mtu", str(int(mtu))]]
     if txqueuelen is not None:
         cmds += [["ip", "link", "set", "dev", name, "txqueuelen", str(int(txqueuelen))]]
+    if mac is not None:
+        cmds += [["ip", "link", "set", "dev", name, "address", mac]]
     if up:
         cmds += [["ip", "link", "set", "dev", name, "up"]]
 
