@@ -246,7 +246,7 @@ def detect_kind(header: stats_core.Header) -> str:
         return "ufrx"
     if header.module_type == stats_core.ModuleType.PTX:
         return "ptx"
-    if header.module_type == stats_core.ModuleType.L2_TAP2_TAP:
+    if header.module_type == stats_core.ModuleType.L2_TAP:
         return "l2tap"
     if header.module_type == stats_core.ModuleType.TX:
         return "tx"
@@ -756,7 +756,7 @@ def render_rx(record: ModuleRecord) -> Group:
 
 def render_l2tap(record: ModuleRecord) -> Group:
     summary = record.summary
-    labels = ["pks_tx", "rate_tx (kbps)", "pks_rx", "rate_rx (kbps)"]
+    labels = ["pkts_tx", "rate_tx (kbps)", "pkts_rx", "rate_rx (kbps)"]
     if summary is not None:
         values = [
             str(summary.packets_total),
@@ -769,7 +769,13 @@ def render_l2tap(record: ModuleRecord) -> Group:
     table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
     table.add_row(*[Text(label, style="cyan") for label in labels])
     table.add_row(*values)
-    return Group(table)
+    blocks = [table]
+    if summary is not None:
+        drops_table = Table(box=None, show_header=False, expand=True, padding=(0, 1))
+        drops_table.add_row(Text("drops_tap", style="cyan"), Text(str(summary.tx_count), style="bright_black"))
+        drops_table.add_row(Text("drops_udp", style="cyan"), Text(str(summary.flags), style="bright_black"))
+        blocks.append(drops_table)
+    return Group(*blocks)
 def render_ptx(record: ModuleRecord) -> Group:
     blocks: List = []
     summary = record.ptx_summary

@@ -211,7 +211,7 @@ def main(
 
     def send_stats(now: float):
         nonlocal period_start, stat_tick
-        nonlocal tx_pkts, rx_pkts, tap_write_drops, udp_send_drops
+        nonlocal tx_pkts, rx_pkts, tx_bytes, rx_bytes, tap_write_drops, udp_send_drops
 
         if sock_stat is None or stat_addr is None or tap_actual is None:
             return
@@ -223,14 +223,14 @@ def main(
         summary = stats_core.Summary(
             dt_ms=dt_ms,
             packets_total=tx_pkts,
-            bytes_total=tx_bytes,
+            bytes_total=rx_pkts,
             ctrl_epoch_sent=rate_tx_kbps,
             iface_count=rate_rx_kbps,
-            tx_count=0,
-            flags=0,
+            tx_count=tap_write_drops,
+            flags=udp_send_drops,
         )
         preview = (
-            f"tap={tap_actual} pks_tx={tx_pkts} pks_rx={rx_pkts} "
+            f"tap={tap_actual} pkts_tx={tx_pkts} pkts_rx={rx_pkts} "
             f"rate_tx={rate_tx_kbps}kbps rate_rx={rate_rx_kbps}kbps "
             f"drops_tap={tap_write_drops} drops_udp={udp_send_drops}"
         ).encode("utf-8")
@@ -256,8 +256,8 @@ def main(
             print(f"[l2tap] failed to send stats: {exc}")
         stat_tick += 1
         period_start = now
-        tx_pkts = 0
-        rx_pkts = 0
+        tx_pkts = rx_pkts = 0
+        tx_bytes = rx_bytes = 0
         tap_write_drops = udp_send_drops = 0
 
     while True:
@@ -293,6 +293,7 @@ def main(
                     print(f"[l2tap] UDP send error: {exc}")
                     continue
                 tx_pkts += 1
+                tx_bytes += len(data)
             elif key.data == "udp":
                 try:
                     data, _addr = sock_rx.recvfrom(read_buf)
@@ -315,6 +316,7 @@ def main(
                     print(f"[l2tap] TAP write error: {exc}")
                     continue
                 rx_pkts += 1
+                rx_bytes += len(data)
 
     cleanup()
     print("[l2tap] stopped")
