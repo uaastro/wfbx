@@ -758,11 +758,13 @@ def render_l2tap(record: ModuleRecord) -> Group:
     summary = record.summary
     labels = ["pkts_tx", "rate_tx (kbps)", "pkts_rx", "rate_rx (kbps)"]
     if summary is not None:
+        rate_tx = summary.ctrl_epoch_sent / 10.0
+        rate_rx = summary.iface_count / 10.0
         values = [
             str(summary.packets_total),
-            f"{summary.ctrl_epoch_sent}",
+            f"{rate_tx:.1f}",
             str(summary.bytes_total),
-            f"{summary.iface_count}",
+            f"{rate_rx:.1f}",
         ]
     else:
         values = ["n/a", "n/a", "n/a", "n/a"]

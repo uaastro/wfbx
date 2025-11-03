@@ -27,6 +27,8 @@ l2tap_bridge = br-wfbx
 
 Each instance uses the TAP name from `DEFAULT` (wfbxtap0) and its own pair of UDP
 ports. The TAP is always brought UP, created without persistence and single-queue.
+At startup the service removes any stale interface with the same name and assigns
+a fresh locally administered MAC address so both endpoints avoid conflicts.
 Ensure the radio chain provides slots in both directions for the chosen ports.
 
 ## Bridge Management
@@ -40,8 +42,23 @@ IP/routes on `wfbxtap0` manually.
 ## Monitoring
 
 The module reports to statd using the `L2_TAP` module type. The summary payload encodes
-`pks_tx`, `pks_rx`, `rate_tx`, `rate_rx` (packets per second). The text preview also
-lists TAP/UDP drop counters for quick inspection.
+`pkts_tx`, `rate_tx` (tenths of kbps), `pkts_rx`, and `rate_rx` (tenths of kbps).
+`wfbx_top` converts the rates back to floating-point kbps for display. The text preview
+contains the same counters plus TAP/UDP drop statistics for quick inspection. Statistics
+emit once per `l2tap_stat_period` (default 1000 ms). If the TAP cannot be removed or the
+stats socket setup fails, `l2tap` exits with a non-zero status so `wfbx_server` can
+restart the unit.
+
+### Summary Field Mapping
+
+`l2tap` reuses the generic `SUMMARY` structure as follows:
+
+- `packets_total` — TAP frames transmitted during the window.
+- `bytes_total` — TAP frames received during the window.
+- `ctrl_epoch_sent` — transmit rate in kbps × 10 (tenths of kbps).
+- `iface_count` — receive rate in kbps × 10.
+- `tx_count` — count of TAP write drops (UDP → TAP path).
+- `flags` — count of UDP send drops (TAP → UDP path).
 
 ## Limitations
 

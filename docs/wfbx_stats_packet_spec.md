@@ -71,6 +71,8 @@ Immediately after the header, `section_count` records are packed back-to-back. E
 > * `wfb_tx`/`wfb_rx` (legacy classic link) report as module types `WFBX_TX` / `WFBX_RX`.
 > * `wfbx_tx`/`wfbx_rx` (mesh-capable pipeline) report as `WFBX_XTX` / `WFBX_XRX`.
 > * PTX uses `WFBX_PTX` and exposes pre-TX multiplexer stats.
+> * `l2tap` reports as `WFBX_L2_TAP`; its summary repurposes fields for TAP-specific
+>   counters (see `docs/wfbx_l2tap.md`).
 
 Sections are not padded. Receivers should skip unknown section `type`s by advancing `length` bytes.
 
