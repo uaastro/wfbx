@@ -218,8 +218,8 @@ def main(
 
         dt_ms = max(1, int((now - period_start) * 1000))
         period_ms = dt_ms
-        rate_tx_kbps = (tx_bytes * 8) / (period_ms if period_ms > 0 else 1) / 1000.0
-        rate_rx_kbps = (rx_bytes * 8) / (period_ms if period_ms > 0 else 1) / 1000.0
+        rate_tx_kbps = (tx_bytes * 8) / period_ms if period_ms > 0 else 0.0
+        rate_rx_kbps = (rx_bytes * 8) / period_ms if period_ms > 0 else 0.0
         summary = stats_core.Summary(
             dt_ms=dt_ms,
             packets_total=tx_pkts,
