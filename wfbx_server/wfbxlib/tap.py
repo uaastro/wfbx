@@ -108,6 +108,23 @@ def configure_iface(
             raise TapError(f"failed to execute '{' '.join(cmd)}': {exc}") from exc
 
 
+def delete_iface(name: str) -> None:
+    """Remove a TAP interface by name (best-effort)."""
+    if not name:
+        return
+    try:
+        subprocess.run(
+            ["ip", "link", "delete", "dev", name],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise TapError(f"failed to delete interface '{name}': {exc}") from exc
+    except FileNotFoundError as exc:
+        raise TapError("`ip` command not found; cannot delete TAP") from exc
+
+
 def ensure_bridge(name: str, *, stp: Optional[bool] = None, up: bool = True) -> None:
     """Create a bridge if it does not yet exist."""
     exists = os.path.exists(f"/sys/class/net/{name}")
@@ -159,6 +176,7 @@ __all__ = [
     "open_tap",
     "set_persist",
     "configure_iface",
+    "delete_iface",
     "ensure_bridge",
     "add_ifaces_to_bridge",
 ]

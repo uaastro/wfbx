@@ -65,7 +65,7 @@ def main(
     stat_addr: Optional[Tuple[str, int]] = None
 
     def cleanup():
-        nonlocal tap_fd, sock_rx, sock_tx, sock_stat
+        nonlocal tap_fd, tap_actual, sock_rx, sock_tx, sock_stat
         for sock in (sock_rx, sock_tx, sock_stat):
             if sock is None:
                 continue
@@ -86,6 +86,14 @@ def main(
                 pass
             tap_fd = None
 
+        if tap_actual is not None:
+            try:
+                if os.path.exists(f"/sys/class/net/{tap_actual}"):
+                    taplib.delete_iface(tap_actual)
+            except Exception:
+                pass
+            tap_actual = None
+
     def signal_handler(sig, frame):
         cleanup()
         sys.exit(0)
@@ -95,6 +103,14 @@ def main(
     signal.signal(signal.SIGTERM, signal_handler)
 
     # --- TAP init ---
+    tap_sysfs_path = f"/sys/class/net/{tap_name}"
+    if os.path.exists(tap_sysfs_path):
+        print(f"[l2tap] removing stale TAP {tap_name}")
+        try:
+            taplib.delete_iface(tap_name)
+        except taplib.TapError as exc:
+            raise click.ClickException(f"failed to remove stale TAP '{tap_name}': {exc}")
+
     try:
         tap_fd, tap_actual = taplib.open_tap(
             tap_name,
