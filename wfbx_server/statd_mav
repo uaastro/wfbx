@@ -1,0 +1,467 @@
+#!/usr/bin/python3
+from __future__ import annotations
+
+import atexit
+import logging
+import selectors
+import signal
+import socket
+import struct
+import sys
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+import click
+import pymavlink.dialects.v20.ardupilotmega as mavlink2_0
+
+from wfbxlib.stats import core as stats_core
+from wfbxlib.stats import mx as stats_mx
+from wfbxlib.stats import rx as stats_rx
+from wfbxlib.stats import tx as stats_tx
+from wfbxlib.stats import xrx as stats_xrx
+from wfbxlib.stats import xtx as stats_xtx
+
+logger = logging.getLogger("statd_mav")
+
+
+@dataclass
+class MavPayload:
+    params: Tuple[float, float, float, float, float, float, float]
+
+    @classmethod
+    def from_sequence(cls, values: Sequence[float]) -> "MavPayload":
+        buf = [float(v) for v in values][:7]
+        if len(buf) < 7:
+            buf.extend([0.0] * (7 - len(buf)))
+        return cls(tuple(buf))
+
+
+@dataclass
+class HandlerContext:
+    tx_id: int
+    warn_once: Callable[[str, str], None]
+
+
+SectionMap = Dict[int, List[bytes]]
+HandlerFunc = Callable[[stats_core.Header, SectionMap, HandlerContext], Optional[MavPayload]]
+
+
+def parse_host_port(addr: str) -> Tuple[str, int]:
+    host, port = addr.rsplit(":", 1)
+    return host, int(port)
+
+
+def make_mcast_receiver(mcast_addr: str) -> socket.socket:
+    host, port = parse_host_port(mcast_addr)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except OSError:
+            pass
+    sock.bind(("", port))
+    group = socket.inet_aton(host)
+    mreq = struct.pack("4s4s", group, socket.inet_aton("0.0.0.0"))
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    sock.setblocking(False)
+    return sock
+
+
+def make_unicast_sender(dst_addr: str) -> Tuple[socket.socket, Tuple[str, int]]:
+    host, port = parse_host_port(dst_addr)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    return sock, (host, port)
+
+
+def build_section_map(sections: List[Tuple[int, bytes]]) -> SectionMap:
+    mapping: SectionMap = {}
+    for section_type, payload in sections:
+        mapping.setdefault(section_type, []).append(payload)
+    return mapping
+
+
+def make_warn_once() -> Callable[[str, str], None]:
+    seen: set[str] = set()
+
+    def _warn(key: str, message: str) -> None:
+        if key in seen:
+            return
+        logger.warning(message)
+        seen.add(key)
+
+    return _warn
+
+
+def _select_tx_entry(entries, tx_id: int, label: str, warn_once: Callable[[str, str], None]):
+    if not entries:
+        warn_once(f"{label}:empty_tx_summary", f"[{label}] секция TX_SUMMARY пуста")
+        return None
+    for entry in entries:
+        if entry.tx_id == tx_id:
+            return entry
+    warn_once(
+        f"{label}:missing_tx_id",
+        f"[{label}] tx_id={tx_id} не найден, используется tx_id={entries[0].tx_id}",
+    )
+    return entries[0]
+
+
+def _freq_from_details(details, tx_id: int) -> float:
+    for detail in details:
+        if getattr(detail, "tx_id", None) == tx_id and getattr(detail, "freq_mhz", 0):
+            return float(detail.freq_mhz)
+    return 0.0
+
+
+def _link_payload_from_tx(entry, freq_mhz: float) -> MavPayload:
+    rssi = float(entry.rssi_q8) / 256.0
+    quality = float(entry.quality_permille) / 10.0
+    packets = float(entry.packets)
+    rate = float(entry.rate_kbps)
+    return MavPayload((rssi, quality, packets, rate, float(freq_mhz), 0.0, 0.0))
+
+
+def handle_rx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
+    payloads = section_map.get(int(stats_rx.SectionType.TX_SUMMARY), [])
+    if not payloads:
+        ctx.warn_once("RX:no_tx_summary", "[RX] нет секции TX_SUMMARY")
+        return None
+    try:
+        entries = stats_rx.unpack_tx_summary_section(payloads[0])
+    except ValueError as exc:
+        ctx.warn_once("RX:parse_error", f"[RX] ошибка парсинга TX_SUMMARY: {exc}")
+        return None
+    entry = _select_tx_entry(entries, ctx.tx_id, "RX", ctx.warn_once)
+    if entry is None:
+        return None
+    return _link_payload_from_tx(entry, 0.0)
+
+
+def handle_xrx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
+    payloads = section_map.get(int(stats_xrx.SectionType.TX_SUMMARY), [])
+    if not payloads:
+        ctx.warn_once("XRX:no_tx_summary", "[XRX] нет секции TX_SUMMARY")
+        return None
+    try:
+        entries = stats_xrx.unpack_tx_summary_section(payloads[0])
+    except ValueError as exc:
+        ctx.warn_once("XRX:parse_error", f"[XRX] ошибка парсинга TX_SUMMARY: {exc}")
+        return None
+    entry = _select_tx_entry(entries, ctx.tx_id, "XRX", ctx.warn_once)
+    if entry is None:
+        return None
+
+    freq = 0.0
+    if_details = section_map.get(int(stats_xrx.SectionType.IF_DETAIL), [])
+    for payload in if_details:
+        try:
+            details = stats_xrx.unpack_if_detail_section(payload)
+        except ValueError as exc:
+            ctx.warn_once("XRX:if_detail_error", f"[XRX] ошибка парсинга IF_DETAIL: {exc}")
+            continue
+        freq = _freq_from_details(details, ctx.tx_id)
+        if freq:
+            break
+    return _link_payload_from_tx(entry, freq)
+
+
+def _unpack_mx_tx_summary(section_payload: bytes) -> List[stats_mx.TxSummary]:
+    size = stats_mx.TX_SUMMARY_STRUCT.size  # type: ignore[attr-defined]
+    if len(section_payload) % size != 0:
+        raise ValueError("MX TX_SUMMARY не кратен размеру структуры")
+    entries: List[stats_mx.TxSummary] = []
+    for offset in range(0, len(section_payload), size):
+        chunk = section_payload[offset : offset + size]
+        entries.append(stats_mx.TxSummary.unpack(chunk))
+    return entries
+
+
+def handle_mx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
+    payloads = section_map.get(int(stats_mx.SectionType.TX_SUMMARY), [])
+    if not payloads:
+        ctx.warn_once("MX:no_tx_summary", "[MX] нет секции TX_SUMMARY")
+        return None
+    try:
+        entries = _unpack_mx_tx_summary(payloads[0])
+    except ValueError as exc:
+        ctx.warn_once("MX:parse_error", f"[MX] ошибка парсинга TX_SUMMARY: {exc}")
+        return None
+    entry = _select_tx_entry(entries, ctx.tx_id, "MX", ctx.warn_once)
+    if entry is None:
+        return None
+
+    freq = 0.0
+    if_details = section_map.get(int(stats_mx.SectionType.IF_DETAIL), [])
+    for payload in if_details:
+        try:
+            detail = stats_mx.IfDetail.unpack(payload)
+        except ValueError as exc:
+            ctx.warn_once("MX:if_detail_error", f"[MX] ошибка парсинга IF_DETAIL: {exc}")
+            continue
+        freq = _freq_from_details([detail], ctx.tx_id)
+        if freq:
+            break
+
+    return _link_payload_from_tx(entry, freq)
+
+
+def handle_tx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
+    payloads = section_map.get(int(stats_tx.SectionType.SUMMARY), [])
+    if not payloads:
+        ctx.warn_once("TX:no_summary", "[TX] нет секции SUMMARY")
+        return None
+    try:
+        summary = stats_tx.Summary.unpack(payloads[0])
+    except ValueError as exc:
+        ctx.warn_once("TX:parse_error", f"[TX] ошибка парсинга SUMMARY: {exc}")
+        return None
+    values = [
+        summary.dt_ms,
+        summary.udp_rx_packets,
+        summary.udp_rx_kbps_x10,
+        summary.sent_packets,
+        summary.sent_kbps_x10,
+        summary.drop_overflow,
+        summary.reserved0,
+    ]
+    return MavPayload.from_sequence(values)
+
+
+def handle_xtx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
+    payloads = section_map.get(int(stats_xtx.SectionType.SUMMARY), [])
+    if not payloads:
+        ctx.warn_once("XTX:no_summary", "[XTX] нет секции SUMMARY")
+        return None
+    try:
+        summary = stats_xtx.Summary.unpack(payloads[0])
+    except ValueError as exc:
+        ctx.warn_once("XTX:parse_error", f"[XTX] ошибка парсинга SUMMARY: {exc}")
+        return None
+    values = [
+        summary.dt_ms,
+        summary.udp_rx_packets,
+        summary.udp_rx_kbps_x10,
+        summary.sent_packets,
+        summary.sent_kbps_x10,
+        summary.drop_overflow,
+        summary.reserved0,
+    ]
+    return MavPayload.from_sequence(values)
+
+
+def handle_core_summary(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
+    payloads = section_map.get(int(stats_core.SectionType.SUMMARY), [])
+    if not payloads:
+        ctx.warn_once("CORE:no_summary", "[CORE] нет секции SUMMARY")
+        return None
+    try:
+        summary = stats_core.Summary.unpack(payloads[0])
+    except ValueError as exc:
+        ctx.warn_once("CORE:parse_error", f"[CORE] ошибка парсинга SUMMARY: {exc}")
+        return None
+    values = [
+        summary.dt_ms,
+        summary.packets_total,
+        summary.bytes_total,
+        summary.ctrl_epoch_sent,
+        summary.iface_count,
+        summary.tx_count,
+        summary.flags,
+    ]
+    return MavPayload.from_sequence(values)
+
+
+HANDLERS: Dict[stats_core.ModuleType, HandlerFunc] = {
+    stats_core.ModuleType.TX: handle_tx,
+    stats_core.ModuleType.RX: handle_rx,
+    stats_core.ModuleType.MX: handle_mx,
+    stats_core.ModuleType.PTX: handle_core_summary,
+    stats_core.ModuleType.UPRX: handle_core_summary,
+    stats_core.ModuleType.UFRX: handle_core_summary,
+    stats_core.ModuleType.XTX: handle_xtx,
+    stats_core.ModuleType.XRX: handle_xrx,
+    stats_core.ModuleType.L2_TAP: handle_core_summary,
+    stats_core.ModuleType.UNKNOWN: handle_core_summary,
+}
+
+
+def build_mavlink_packet(
+    mav: mavlink2_0.MAVLink,
+    payload: MavPayload,
+    *,
+    target_system: int,
+    target_component: int,
+    command: int,
+) -> bytes:
+    command_msg = mav.command_long_encode(
+        target_system=target_system,
+        target_component=target_component,
+        command=command,
+        confirmation=0,
+        param1=payload.params[0],
+        param2=payload.params[1],
+        param3=payload.params[2],
+        param4=payload.params[3],
+        param5=payload.params[4],
+        param6=payload.params[5],
+        param7=payload.params[6],
+    )
+    return command_msg.pack(mav)
+
+
+def process_datagram(
+    datagram: bytes,
+    *,
+    host_id: str,
+    module_id: str,
+    tx_id: int,
+    handler_ctx: HandlerContext,
+    id_tgs: int,
+    id_tgc: int,
+    id_cmd: int,
+    mav: mavlink2_0.MAVLink,
+    tx_sock: socket.socket,
+    tx_addr: Tuple[str, int],
+) -> None:
+    try:
+        header, sections = stats_core.decode_packet(datagram)
+    except ValueError as exc:
+        logger.debug("Пропуск пакета: не удалось декодировать заголовок (%s)", exc)
+        return
+
+    if header.host_id != host_id or header.module_id != module_id:
+        return
+
+    section_map = build_section_map(sections)
+    handler = HANDLERS.get(header.module_type, handle_core_summary)
+    payload = handler(header, section_map, handler_ctx)
+    if payload is None:
+        return
+
+    packet = build_mavlink_packet(
+        mav,
+        payload,
+        target_system=id_tgs,
+        target_component=id_tgc,
+        command=id_cmd,
+    )
+    try:
+        tx_sock.sendto(packet, tx_addr)
+    except OSError as exc:
+        logger.error("Не удалось отправить MAVLink пакет: %s", exc)
+        return
+
+    logger.info(
+        "Отправлен MAVLink tick=%s host=%s module=%s type=%s",
+        header.tick_id,
+        header.host_id,
+        header.module_id,
+        header.module_type.name,
+    )
+
+
+@click.command()
+@click.option("--mcast", default="239.255.0.1:9100", show_default=True, help="Multicast source address (ip:port)")
+@click.option("--dst", required=True, help="Unicast destination (ip:port)")
+@click.option("--host-id", required=True, help="Target host identifier")
+@click.option("--module-id", required=True, help="Target module identifier")
+@click.option("--tx-id", default=0, show_default=True, help="TX ID for RX/XRX/MX modules")
+@click.option("--id_tgs", default=255, show_default=True, help="target system id")
+@click.option("--id_tgc", default=100, show_default=True, help="target component id")
+@click.option("--id_cmd", default=1258, show_default=True, help="command id")
+@click.option("--id_srcs", default=255, show_default=True, help="source system id")
+@click.option("--id_srcc", default=75, show_default=True, help="source component id")
+def main(
+    mcast: str,
+    dst: str,
+    host_id: str,
+    module_id: str,
+    tx_id: int,
+    id_tgs: int,
+    id_tgc: int,
+    id_cmd: int,
+    id_srcs: int,
+    id_srcc: int,
+) -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    sockets: List[socket.socket] = []
+
+    def cleanup() -> None:
+        for sock in sockets:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def handle_signal(sig, _frame) -> None:
+        logger.info("Получен сигнал %s, завершаем работу", sig)
+        cleanup()
+        sys.exit(0)
+
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    rx_sock = make_mcast_receiver(mcast)
+    sockets.append(rx_sock)
+    tx_sock, tx_addr = make_unicast_sender(dst)
+    sockets.append(tx_sock)
+
+    mav = mavlink2_0.MAVLink(None, srcSystem=id_srcs, srcComponent=id_srcc)
+
+    selector = selectors.DefaultSelector()
+    selector.register(rx_sock, selectors.EVENT_READ)
+
+    warn_once = make_warn_once()
+    handler_ctx = HandlerContext(tx_id=tx_id, warn_once=warn_once)
+
+    logger.info(
+        "statd_mav слушает %s, фильтр host=%s module=%s, tx_id=%s -> %s",
+        mcast,
+        host_id,
+        module_id,
+        tx_id,
+        dst,
+    )
+
+    while True:
+        events = selector.select(timeout=1.0)
+        if not events:
+            continue
+        for key, _mask in events:
+            if key.fileobj is not rx_sock:
+                continue
+            while True:
+                try:
+                    datagram, _peer = rx_sock.recvfrom(65535)
+                except BlockingIOError:
+                    break
+                except OSError as exc:
+                    logger.warning("Ошибка recvfrom: %s", exc)
+                    break
+
+                if not datagram:
+                    continue
+
+                process_datagram(
+                    datagram,
+                    host_id=host_id,
+                    module_id=module_id,
+                    tx_id=tx_id,
+                    handler_ctx=handler_ctx,
+                    id_tgs=id_tgs,
+                    id_tgc=id_tgc,
+                    id_cmd=id_cmd,
+                    mav=mav,
+                    tx_sock=tx_sock,
+                    tx_addr=tx_addr,
+                )
+
+
+if __name__ == "__main__":
+    main()
