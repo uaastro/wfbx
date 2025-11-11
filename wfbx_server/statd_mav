@@ -95,14 +95,14 @@ def make_warn_once() -> Callable[[str, str], None]:
 
 def _select_tx_entry(entries, tx_id: int, label: str, warn_once: Callable[[str, str], None]):
     if not entries:
-        warn_once(f"{label}:empty_tx_summary", f"[{label}] секция TX_SUMMARY пуста")
+        warn_once(f"{label}:empty_tx_summary", f"[{label}] TX_SUMMARY section is empty")
         return None
     for entry in entries:
         if entry.tx_id == tx_id:
             return entry
     warn_once(
         f"{label}:missing_tx_id",
-        f"[{label}] tx_id={tx_id} не найден, используется tx_id={entries[0].tx_id}",
+        f"[{label}] tx_id={tx_id} not found, using tx_id={entries[0].tx_id}",
     )
     return entries[0]
 
@@ -125,12 +125,12 @@ def _link_payload_from_tx(entry, freq_mhz: float) -> MavPayload:
 def handle_rx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
     payloads = section_map.get(int(stats_rx.SectionType.TX_SUMMARY), [])
     if not payloads:
-        ctx.warn_once("RX:no_tx_summary", "[RX] нет секции TX_SUMMARY")
+        ctx.warn_once("RX:no_tx_summary", "[RX] missing TX_SUMMARY section")
         return None
     try:
         entries = stats_rx.unpack_tx_summary_section(payloads[0])
     except ValueError as exc:
-        ctx.warn_once("RX:parse_error", f"[RX] ошибка парсинга TX_SUMMARY: {exc}")
+        ctx.warn_once("RX:parse_error", f"[RX] failed to parse TX_SUMMARY: {exc}")
         return None
     entry = _select_tx_entry(entries, ctx.tx_id, "RX", ctx.warn_once)
     if entry is None:
@@ -141,12 +141,12 @@ def handle_rx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerCo
 def handle_xrx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
     payloads = section_map.get(int(stats_xrx.SectionType.TX_SUMMARY), [])
     if not payloads:
-        ctx.warn_once("XRX:no_tx_summary", "[XRX] нет секции TX_SUMMARY")
+        ctx.warn_once("XRX:no_tx_summary", "[XRX] missing TX_SUMMARY section")
         return None
     try:
         entries = stats_xrx.unpack_tx_summary_section(payloads[0])
     except ValueError as exc:
-        ctx.warn_once("XRX:parse_error", f"[XRX] ошибка парсинга TX_SUMMARY: {exc}")
+        ctx.warn_once("XRX:parse_error", f"[XRX] failed to parse TX_SUMMARY: {exc}")
         return None
     entry = _select_tx_entry(entries, ctx.tx_id, "XRX", ctx.warn_once)
     if entry is None:
@@ -158,7 +158,7 @@ def handle_xrx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerC
         try:
             details = stats_xrx.unpack_if_detail_section(payload)
         except ValueError as exc:
-            ctx.warn_once("XRX:if_detail_error", f"[XRX] ошибка парсинга IF_DETAIL: {exc}")
+            ctx.warn_once("XRX:if_detail_error", f"[XRX] failed to parse IF_DETAIL: {exc}")
             continue
         freq = _freq_from_details(details, ctx.tx_id)
         if freq:
@@ -169,7 +169,7 @@ def handle_xrx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerC
 def _unpack_mx_tx_summary(section_payload: bytes) -> List[stats_mx.TxSummary]:
     size = stats_mx.TX_SUMMARY_STRUCT.size  # type: ignore[attr-defined]
     if len(section_payload) % size != 0:
-        raise ValueError("MX TX_SUMMARY не кратен размеру структуры")
+        raise ValueError("MX TX_SUMMARY payload misaligned")
     entries: List[stats_mx.TxSummary] = []
     for offset in range(0, len(section_payload), size):
         chunk = section_payload[offset : offset + size]
@@ -180,12 +180,12 @@ def _unpack_mx_tx_summary(section_payload: bytes) -> List[stats_mx.TxSummary]:
 def handle_mx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
     payloads = section_map.get(int(stats_mx.SectionType.TX_SUMMARY), [])
     if not payloads:
-        ctx.warn_once("MX:no_tx_summary", "[MX] нет секции TX_SUMMARY")
+        ctx.warn_once("MX:no_tx_summary", "[MX] missing TX_SUMMARY section")
         return None
     try:
         entries = _unpack_mx_tx_summary(payloads[0])
     except ValueError as exc:
-        ctx.warn_once("MX:parse_error", f"[MX] ошибка парсинга TX_SUMMARY: {exc}")
+        ctx.warn_once("MX:parse_error", f"[MX] failed to parse TX_SUMMARY: {exc}")
         return None
     entry = _select_tx_entry(entries, ctx.tx_id, "MX", ctx.warn_once)
     if entry is None:
@@ -197,7 +197,7 @@ def handle_mx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerCo
         try:
             detail = stats_mx.IfDetail.unpack(payload)
         except ValueError as exc:
-            ctx.warn_once("MX:if_detail_error", f"[MX] ошибка парсинга IF_DETAIL: {exc}")
+            ctx.warn_once("MX:if_detail_error", f"[MX] failed to parse IF_DETAIL: {exc}")
             continue
         freq = _freq_from_details([detail], ctx.tx_id)
         if freq:
@@ -209,12 +209,12 @@ def handle_mx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerCo
 def handle_tx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
     payloads = section_map.get(int(stats_tx.SectionType.SUMMARY), [])
     if not payloads:
-        ctx.warn_once("TX:no_summary", "[TX] нет секции SUMMARY")
+        ctx.warn_once("TX:no_summary", "[TX] missing SUMMARY section")
         return None
     try:
         summary = stats_tx.Summary.unpack(payloads[0])
     except ValueError as exc:
-        ctx.warn_once("TX:parse_error", f"[TX] ошибка парсинга SUMMARY: {exc}")
+        ctx.warn_once("TX:parse_error", f"[TX] failed to parse SUMMARY: {exc}")
         return None
     values = [
         summary.dt_ms,
@@ -231,12 +231,12 @@ def handle_tx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerCo
 def handle_xtx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
     payloads = section_map.get(int(stats_xtx.SectionType.SUMMARY), [])
     if not payloads:
-        ctx.warn_once("XTX:no_summary", "[XTX] нет секции SUMMARY")
+        ctx.warn_once("XTX:no_summary", "[XTX] missing SUMMARY section")
         return None
     try:
         summary = stats_xtx.Summary.unpack(payloads[0])
     except ValueError as exc:
-        ctx.warn_once("XTX:parse_error", f"[XTX] ошибка парсинга SUMMARY: {exc}")
+        ctx.warn_once("XTX:parse_error", f"[XTX] failed to parse SUMMARY: {exc}")
         return None
     values = [
         summary.dt_ms,
@@ -253,12 +253,12 @@ def handle_xtx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerC
 def handle_core_summary(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
     payloads = section_map.get(int(stats_core.SectionType.SUMMARY), [])
     if not payloads:
-        ctx.warn_once("CORE:no_summary", "[CORE] нет секции SUMMARY")
+        ctx.warn_once("CORE:no_summary", "[CORE] missing SUMMARY section")
         return None
     try:
         summary = stats_core.Summary.unpack(payloads[0])
     except ValueError as exc:
-        ctx.warn_once("CORE:parse_error", f"[CORE] ошибка парсинга SUMMARY: {exc}")
+        ctx.warn_once("CORE:parse_error", f"[CORE] failed to parse SUMMARY: {exc}")
         return None
     values = [
         summary.dt_ms,
@@ -327,7 +327,7 @@ def process_datagram(
     try:
         header, sections = stats_core.decode_packet(datagram)
     except ValueError as exc:
-        logger.debug("Пропуск пакета: не удалось декодировать заголовок (%s)", exc)
+        logger.debug("Dropping packet: failed to decode stats header (%s)", exc)
         return
 
     if header.host_id != host_id or header.module_id != module_id:
@@ -349,11 +349,11 @@ def process_datagram(
     try:
         tx_sock.sendto(packet, tx_addr)
     except OSError as exc:
-        logger.error("Не удалось отправить MAVLink пакет: %s", exc)
+        logger.error("Failed to send MAVLink packet: %s", exc)
         return
 
     logger.info(
-        "Отправлен MAVLink tick=%s host=%s module=%s type=%s",
+        "Sent MAVLink tick=%s host=%s module=%s type=%s",
         header.tick_id,
         header.host_id,
         header.module_id,
@@ -399,7 +399,7 @@ def main(
                 pass
 
     def handle_signal(sig, _frame) -> None:
-        logger.info("Получен сигнал %s, завершаем работу", sig)
+        logger.info("Signal %s received, shutting down", sig)
         cleanup()
         sys.exit(0)
 
@@ -421,7 +421,7 @@ def main(
     handler_ctx = HandlerContext(tx_id=tx_id, warn_once=warn_once)
 
     logger.info(
-        "statd_mav слушает %s, фильтр host=%s module=%s, tx_id=%s -> %s",
+        "statd_mav listening on %s, filter host=%s module=%s tx_id=%s -> %s",
         mcast,
         host_id,
         module_id,
@@ -442,7 +442,7 @@ def main(
                 except BlockingIOError:
                     break
                 except OSError as exc:
-                    logger.warning("Ошибка recvfrom: %s", exc)
+                    logger.warning("recvfrom error: %s", exc)
                     break
 
                 if not datagram:
