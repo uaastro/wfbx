@@ -272,13 +272,32 @@ def handle_core_summary(header: stats_core.Header, section_map: SectionMap, ctx:
     return MavPayload.from_sequence(values)
 
 
+def handle_ufrx(header: stats_core.Header, section_map: SectionMap, ctx: HandlerContext) -> Optional[MavPayload]:
+    payloads = section_map.get(int(stats_core.SectionType.SUMMARY), [])
+    if not payloads:
+        ctx.warn_once("UFRX:no_summary", "[UFRX] missing SUMMARY section")
+        return None
+    try:
+        summary = stats_core.Summary.unpack(payloads[0])
+    except ValueError as exc:
+        ctx.warn_once("UFRX:parse_error", f"[UFRX] failed to parse SUMMARY: {exc}")
+        return None
+
+    rate_kbps = 0.0
+    if summary.dt_ms > 0:
+        rate_kbps = (summary.bytes_total * 8.0) / summary.dt_ms
+    quality = float(summary.flags)
+    packets = float(summary.packets_total)
+    return MavPayload((rate_kbps, quality, packets, 0.0, 0.0, 0.0, 0.0))
+
+
 HANDLERS: Dict[stats_core.ModuleType, HandlerFunc] = {
     stats_core.ModuleType.TX: handle_tx,
     stats_core.ModuleType.RX: handle_rx,
     stats_core.ModuleType.MX: handle_mx,
     stats_core.ModuleType.PTX: handle_core_summary,
     stats_core.ModuleType.UPRX: handle_core_summary,
-    stats_core.ModuleType.UFRX: handle_core_summary,
+    stats_core.ModuleType.UFRX: handle_ufrx,
     stats_core.ModuleType.XTX: handle_xtx,
     stats_core.ModuleType.XRX: handle_xrx,
     stats_core.ModuleType.L2_TAP: handle_core_summary,
