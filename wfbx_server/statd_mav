@@ -62,7 +62,8 @@ def make_mcast_receiver(mcast_addr: str) -> socket.socket:
             pass
     sock.bind(("", port))
     group = socket.inet_aton(host)
-    mreq = struct.pack("4s4s", group, socket.inet_aton("0.0.0.0"))
+    loop_iface = socket.inet_aton("127.0.0.1")
+    mreq = struct.pack("4s4s", group, loop_iface)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     sock.setblocking(False)
     return sock

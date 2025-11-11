@@ -4,6 +4,7 @@ import atexit
 import selectors
 import signal
 import socket
+import struct
 import sys
 import time
 from dataclasses import dataclass
@@ -54,25 +55,20 @@ class ModuleRecord:
     last_update: float
 
 
-def create_mcast_socket(group_ip: str, port: int) -> socket.socket:
+def create_mcast_socket(group_ip: str, port: int, iface: str = "127.0.0.1") -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind(("", port))
     except OSError:
         sock.bind((group_ip, port))
-    group_bin = socket.inet_aton(group_ip)
-    iface_bins: List[bytes] = [socket.inet_aton("0.0.0.0")]
     try:
-        iface_bins.append(socket.inet_aton("127.0.0.1"))
-    except OSError:
-        pass
-    for iface_bin in iface_bins:
-        mreq = group_bin + iface_bin
-        try:
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-        except OSError:
-            continue
+        group_bin = socket.inet_aton(group_ip)
+        iface_bin = socket.inet_aton(iface)
+    except OSError as exc:
+        raise click.ClickException(f"Invalid multicast or interface address: {exc}")
+    mreq = struct.pack("4s4s", group_bin, iface_bin)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     sock.setblocking(False)
     return sock
 
