@@ -33,6 +33,15 @@ def _write_config_atomic(config, path):
             os.fsync(tmp.fileno())
             tmp_path = tmp.name
         os.replace(tmp_path, path)
+
+        dir_fd = None
+        try:
+            dir_flags = getattr(os, "O_DIRECTORY", 0) or os.O_RDONLY
+            dir_fd = os.open(directory, dir_flags)
+            os.fsync(dir_fd)
+        finally:
+            if dir_fd is not None:
+                os.close(dir_fd)
     except Exception:
         if tmp_path:
             try:
