@@ -18,6 +18,7 @@ mkdir -p /usr/sbin/wfbx
 cp -r ./wfbx_server/* /usr/sbin/wfbx/
 cp ./wfbx_server/wfbx.service /etc/systemd/system/
 
+
 # Create key and copy to right location
 #./wfb_keygen
 #cp ./cfg/*.key /etc/
@@ -29,7 +30,7 @@ cp -r ./bin/* /usr/sbin/wfbx/
 #cp ./bin/wfbx_mx /usr/sbin/wfbx_server/
 #cp ./bin/wfbx_keygen /usr/sbin/wfbx_server/
 
-#/usr/sbin/wfbx_server/add_wlan wlx*
+/usr/sbin/wfbx/add_wlan wlx*
 
 cat <<EOF >> /etc/bash.bashrc
 export PATH=\$PATH:/usr/sbin/wfbx
