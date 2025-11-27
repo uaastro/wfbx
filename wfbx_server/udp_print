@@ -1,0 +1,59 @@
+#!/usr/bin/python3
+
+import socket
+import time
+import struct
+
+from rich.console import Console
+from rich.live import Live
+from rich.table import Table
+from rich import box
+import select
+import tty
+import termios
+import atexit
+import signal
+import sys
+import click
+
+@click.command()
+@click.option('--ip', default="0.0.0.0", help='address of udp server/default 0.0.0.0')
+@click.option('--port', default=15100,help='port of udp server/default 5600')
+@click.option('--mpksize', default=2048, help='max packet size/default 2048')
+
+def main(ip, port,mpksize):
+    sock= None
+
+    def cleanup():
+        try:
+            if sock is not None:
+                sock.close()
+        except Exception:
+                pass
+
+    def signal_handler(sig, frame):
+        cleanup()
+        sys.exit(0)
+
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, 'SO_REUSEPORT'):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except Exception:
+        pass
+    sock.bind((ip, port))
+    
+    print(ip,':',port)
+
+    while True:
+        packet, addr = sock.recvfrom(mpksize)
+        print("[",addr,"]",packet)
+
+
+if __name__ == '__main__':
+    main()
