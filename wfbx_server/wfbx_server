@@ -150,6 +150,7 @@ def main(conf):
                 if setup_mode == "auto":
                     for wlan in wlans:
                         subprocess.run(f"ifconfig {wlan} down", shell=True, check=True)
+                        subprocess.run(f"iw dev {wlan} set type monitor", shell=True, check=True)
                         subprocess.run(f"iw dev {wlan} set monitor otherbss", shell=True, check=True)
                         subprocess.run(f"iw reg set US", shell=True, check=True)
                         subprocess.run(f"ifconfig {wlan} up", shell=True, check=True)
