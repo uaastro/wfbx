@@ -72,13 +72,30 @@ echo "[4/6] Creating bridge configuration for br0 + eth0 + tap* ..."
 rm -f "$NETDIR"/10-br0.netdev \
       "$NETDIR"/20-br0.network \
       "$NETDIR"/30-eth0.network \
-      "$NETDIR"/40-tap.network
+      "$NETDIR"/40-tap.network \
+      "$NETDIR"/05-eth0.link \
+      "$NETDIR"/05-br0.link
+
+# 05-eth0.link: random MAC for eth0 on each appearance
+cat > "$NETDIR/05-eth0.link" <<'EOF'
+[Match]
+Name=eth0
+
+[Link]
+# New random locally administered MAC every time eth0 appears
+MACAddressPolicy=random
+# Optional: set fixed speed and duplex
+#AutoNegotiate=no
+#BitsPerSecond=100M
+#Duplex=full
+EOF
 
 # 10-br0.netdev: define the bridge device
 cat > "$NETDIR/10-br0.netdev" <<'EOF'
 [NetDev]
 Name=br0
 Kind=bridge
+MACAddress=02:00:01:44:00:45
 EOF
 
 # 20-br0.network: configure IP for the bridge
