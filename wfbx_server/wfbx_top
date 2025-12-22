@@ -244,6 +244,8 @@ def detect_kind(header: stats_core.Header) -> str:
         return "ptx"
     if header.module_type == stats_core.ModuleType.L2_TAP:
         return "l2tap"
+    if header.module_type == stats_core.ModuleType.BEACON:
+        return "beacon"
     if header.module_type == stats_core.ModuleType.TX:
         return "tx"
     if header.module_type == stats_core.ModuleType.RX:
@@ -334,23 +336,23 @@ def render_preview_text(preview: Optional[str]) -> Optional[Text]:
 def matches_filters(record: ModuleRecord,
                     module_id_filters: List[str],
                     module_type_filters: List[str],
-                    host_id_filter: str) -> bool:
+                    host_id_filters: List[str]) -> bool:
     module_id = record.header.module_id or ""
     host_id = record.header.host_id or ""
     module_id_lower = module_id.lower()
     if module_id_filters:
         if not any(filt in module_id_lower for filt in module_id_filters):
             return False
-    if host_id_filter and host_id_filter.lower() not in host_id.lower():
-        return False
+    if host_id_filters:
+        host_id_lower = host_id.lower()
+        if not any(filt in host_id_lower for filt in host_id_filters):
+            return False
     if module_type_filters:
         mt = record.kind.lower()
         mt_name = record.header.module_type.name.lower()
-        module_id_lower = module_id.lower()
         if not any(
             filt in mt or
-            filt in mt_name or
-            filt in module_id_lower
+            filt in mt_name
             for filt in module_type_filters
         ):
             return False
@@ -802,6 +804,19 @@ def render_generic(record: ModuleRecord, label: str) -> Group:
     return Group(Text("no preview", style="dim"))
 
 
+def render_beacon(record: ModuleRecord) -> Group:
+    preview = record.text_preview
+    if not preview:
+        return Group(Text("no preview", style="dim"))
+    try:
+        return Group(Text.from_markup(preview))
+    except Exception:
+        fallback = render_preview_text(preview)
+        if fallback is not None:
+            return Group(fallback)
+    return Group(Text(preview, style="bright_black"))
+
+
 _SIGNAL_THRESHOLDS = (
     -80.0, -75.0, -74.0, -73.0, -72.0,
     -71.0, -70.0, -71.0, -70.0, -69.0,
@@ -906,6 +921,10 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
         title = f"{host}.{module}"
+    elif record.kind == "beacon":
+        host = record.header.host_id or "-"
+        module = record.header.module_id or "unknown"
+        title = f"{host}.{module}"
     elif record.kind in {"tx", "xtx"}:
         host = record.header.host_id or "-"
         module = record.header.module_id or "unknown"
@@ -927,6 +946,8 @@ def render_module(record: ModuleRecord, now: float) -> Panel:
         body = render_uprx(record)
     elif record.kind == "ufrx":
         body = render_ufrx(record)
+    elif record.kind == "beacon":
+        body = render_beacon(record)
     elif record.kind == "rx":
         body = render_rx(record)
     elif record.kind == "xrx":
@@ -961,7 +982,7 @@ def render_dashboard(modules: Dict[str, ModuleRecord], now: float) -> Panel:
 @click.option("--idle-ms", default=4000, type=int, show_default=True, help="Evict module if idle longer than this (ms)")
 @click.option("--module-id", "module_id_filter", default="", help="Подстрочный фильтр(ы) для module_id, разделяйте запятыми")
 @click.option("--module-type", "module_type_filter", default="", help="Подстрочный фильтр(ы) для module_type, разделяйте запятыми")
-@click.option("--host-id", "host_id_filter", default="", help="Substring filter for host_id")
+@click.option("--host-id", "host_id_filter", default="", help="Substring filter(s) for host_id, comma-separated")
 @click.option(
     "--view-mode",
     type=click.Choice(["summary", "full"], case_sensitive=False),
@@ -1017,6 +1038,7 @@ def main(mcast_ip: str,
 
     module_id_filters = _parse_filter_list(module_id_filter)
     module_type_filters = _parse_filter_list(module_type_filter)
+    host_id_filters = _parse_filter_list(host_id_filter)
 
     global VIEW_MODE
     VIEW_MODE = view_mode.lower()
@@ -1042,7 +1064,7 @@ def main(mcast_ip: str,
                     if log_mode.lower() == "full":
                         console.log(f"[TOP] decode failed: {exc}")
                 else:
-                    if matches_filters(record, module_id_filters, module_type_filters, host_id_filter):
+                    if matches_filters(record, module_id_filters, module_type_filters, host_id_filters):
                         modules[record.key] = record
                         if log_mode.lower() == "full":
                             console.log(f"[TOP] received datagram len={len(datagram)} module={record.key}")

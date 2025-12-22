@@ -64,6 +64,7 @@ Immediately after the header, `section_count` records are packed back-to-back. E
 | 0x07  | `WFBX_XTX` — mesh-aware wfbx_tx                   |
 | 0x08  | `WFBX_XRX` — mesh-aware wfbx_rx                   |
 | 0x09  | `WFBX_L2_TAP`                                    |
+| 0x0A  | `WFBX_BEACON`                                   |
 | 0xFF  | Reserved / unknown                               |
 
 > **Note**

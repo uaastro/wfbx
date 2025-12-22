@@ -1,0 +1,80 @@
+#!/usr/bin/python3
+
+import atexit
+import signal
+import socket
+import sys
+import time
+
+import click
+
+from wfbxlib.stats import core as stats_core
+
+
+@click.command()
+@click.option('--beacon_msg', default='stats_beacon', help='stats beacon message')
+@click.option('--stat_ip', default='127.0.0.1', help='statd ip')
+@click.option('--stat_port', default=9601, type=int, help='statd port')
+@click.option('--stat_id', default='stb', help='statistics module id')
+@click.option('--stat_period', default=1000, type=int, help='statistics period in ms (0 to disable)')
+def main(beacon_msg, stat_ip, stat_port, stat_id, stat_period):
+    sock_stat = None
+
+    def cleanup():
+        try:
+            if sock_stat is not None:
+                sock_stat.close()
+        except Exception as exc:
+            print(exc)
+
+    def signal_handler(_sig, _frame):
+        cleanup()
+        sys.exit(0)
+
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    if stat_period <= 0:
+        print("[stats_beacon] stat_period <= 0, beacon disabled")
+        return
+
+    try:
+        socket.inet_aton(stat_ip)
+    except OSError:
+        print(f"[stats_beacon] invalid stat_ip '{stat_ip}', beacon disabled")
+        return
+
+    sock_stat = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    stat_addr = (stat_ip, stat_port)
+    period_s = stat_period / 1000.0
+    stat_tick = 0
+
+    while True:
+        payload = beacon_msg.encode("utf-8")
+        sections = stats_core.make_sections([
+            (int(stats_core.SectionType.TEXT_PREVIEW), payload),
+        ])
+        header = stats_core.Header(
+            version=1,
+            module_type=stats_core.ModuleType.BEACON,
+            module_id=stat_id,
+            host_id="",
+            tick_id=stat_tick,
+            timestamp_us=int(time.time() * 1_000_000),
+            flags=0,
+            section_count=0,
+            payload_len=0,
+        )
+        packet = stats_core.build_packet(header, sections, with_crc=True)
+        try:
+            sock_stat.sendto(packet, stat_addr)
+        except OSError as exc:
+            print(f"[stats_beacon] failed to send stats: {exc}")
+
+        stat_tick += 1
+        time.sleep(period_s)
+
+
+if __name__ == '__main__':
+    main()

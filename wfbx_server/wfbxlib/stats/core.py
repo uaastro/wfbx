@@ -25,6 +25,7 @@ class ModuleType(enum.IntEnum):
     XTX = 7
     XRX = 8
     L2_TAP = 9
+    BEACON = 10
     UNKNOWN = 255
 
 
