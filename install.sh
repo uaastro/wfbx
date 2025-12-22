@@ -20,7 +20,7 @@ cp ./wfbx_server/wfbx.service /etc/systemd/system/
 
 
 # Create key and copy to right location
-#./wfb_keygen
+#./wfbx_keygen
 #cp ./cfg/*.key /etc/
 
 cp -r ./bin/* /usr/sbin/wfbx/
