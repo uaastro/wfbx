@@ -140,6 +140,7 @@ def main(conf):
                 options = config[section]
                 wlans = options['wlan'].split()
                 channel = options['channel']
+                frequency = 5000 + (channel*5)
                 bandwidth = options['bandwidth']
                 bw_pf = options['bw_pf']
                 setup_mode = options.get('wlan_setup_mode', defaults.get('wlan_setup_mode', 'auto')).strip().lower()
@@ -151,8 +152,8 @@ def main(conf):
                 msg = (
                     f"wlans: [cyan]{wlans_label}[/cyan] "
                     f"channel: [cyan]{channel}[/cyan] "
-                    f"bandwidth: [cyan]{bandwidth}[/cyan] "
-                    f"bw_pf: [cyan]{bw_pf}[/cyan]MHz"
+                    f"freq: [cyan]{frequency}MHz[/cyan] "
+                    f"bandwidth: [cyan]{bandwidth}[/cyan]MHz"
                 )
 
                 argv = [
