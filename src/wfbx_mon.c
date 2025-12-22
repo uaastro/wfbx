@@ -366,13 +366,6 @@ static int txf_parse(struct txid_filter* f, const char* spec)
   return 0;
 }
 
-static int txf_match(const struct txid_filter* f, uint8_t tx)
-{
-  if (f->mode == TXF_ANY) return 1;
-  int present = txf_test(f, tx);
-  return (f->mode == TXF_INCLUDE) ? present : !present;
-}
-
 /* ---- CLI ---------------------------------------------------------------- */
 
 static volatile int g_run = 1;
