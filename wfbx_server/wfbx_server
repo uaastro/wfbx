@@ -146,7 +146,31 @@ def main(conf):
                 if setup_mode not in {"auto", "manual"}:
                     logging.warning("[wlan] invalid wlan_setup_mode '%s', fallback to auto", setup_mode)
                     setup_mode = "auto"
+                
+                wlans_label = ", ".join(wlans)
+                msg = (
+                    f"wlans: [cyan]{wlans_label}[/cyan] "
+                    f"channel: [cyan]{channel}[/cyan] "
+                    f"bandwidth: [cyan]{bandwidth}[/cyan] "
+                    f"bw_pf: [cyan]{bw_pf}[/cyan]MHz"
+                )
 
+                argv = [
+                    wfbx_server_dir + "stats_beacon",
+                    "--beacon_msg", msg,
+                    "--stat_ip", options.get("beacon_stat_ip", defaults.get("beacon_stat_ip", "127.0.0.1")),
+                    "--stat_port", options.get("beacon_stat_port", defaults.get("beacon_stat_port", "9601")),
+                    "--stat_id", section,
+                    "--stat_period", options.get("beacon_stat_period", defaults.get("beacon_stat_period", "1000")),
+                ]
+
+                kill_stale_process(argv[0])
+                log_mode = options.get("log", defaults.get("log", "off"))
+                log_file = options.get("log_file", wfbx_server_dir + "log/" + section + "_beacon.log")
+                p, fh = spawn_module(section + "_beacon", argv, log_mode, log_file, cwd=wfbx_server_dir)
+                process_list.append({"name": section + "_beacon", "proc": p, "fh": fh})
+                process_id[p.pid] = section + "_beacon"
+                
                 if setup_mode == "auto":
                     for wlan in wlans:
                         subprocess.run(f"ifconfig {wlan} down", shell=True, check=True)
