@@ -152,8 +152,8 @@ def main(conf):
                 msg = (
                     f"wlans: [cyan]{wlans_label}[/cyan] "
                     f"channel: [cyan]{channel}[/cyan] "
-                    f"freq: [cyan]{frequency}MHz[/cyan] "
-                    f"bandwidth: [cyan]{bandwidth}[/cyan]MHz"
+                    f"freq: [cyan]{frequency}[/cyan] MHz"
+                    f"bandwidth: [cyan]{bandwidth}[/cyan] MHz"
                 )
 
                 argv = [
